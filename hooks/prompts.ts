@@ -1,11 +1,11 @@
 import type { Command } from '../types'
 
 /** Leads the save prompt, so the save turn can be told apart by its text. */
-export const SAVE_MARKER = '[handoff] Checkpoint before compaction.'
+export const SAVE_MARKER = '[relay] Checkpoint before compaction.'
 
 /**
  * Where the handoff note goes: `dir` (default: the system temp directory's
- * claude-handoff/), named for the project and the UTC time the run started.
+ * claude-relay/), named for the project and the UTC time the run started.
  */
 export function notePathFor(dir: string, projectRoot: string, nowMs: number): string {
   const project = (projectRoot.replace(/\/+$/, '').split('/').pop() || 'session').replace(/[^A-Za-z0-9._-]/g, '-')

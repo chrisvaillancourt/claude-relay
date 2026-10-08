@@ -24,7 +24,7 @@ const DEFAULT_COMPACT_INSTRUCTIONS =
 
 const IDLE: Run = { phase: 'idle', runId: 0, saveTurnId: null, startedAt: null, notePath: null }
 
-const runAtom = atom({ plugin: 'handoff', key: 'run' } as const, IDLE)
+const runAtom = atom({ plugin: 'relay', key: 'run' } as const, IDLE)
 
 // Module variables reset on a hot reload; `$.state` survives one. A run left
 // `continuing` by a reload has lost its timer, so session.start resets it.
@@ -68,7 +68,7 @@ async function finish($: EngineInterface, runId: number, message: string | null)
     if (run.runId !== runId || run.phase === 'idle') return
     await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId } : cur))
     $.ui.status(undefined)
-    if (message) $.ui.log(`handoff: ${message}`)
+    if (message) $.ui.log(`relay: ${message}`)
   } catch {
     // Reporting must never throw out of a hook or timer.
   }
@@ -93,7 +93,7 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
     await finish(
       $,
       runId,
-      'stopped: a new turn started before compaction. The continuation prompt is saved: /compact, then /handoff paste.',
+      'stopped: a new turn started before compaction. The continuation prompt is saved: /compact, then /relay paste.',
     )
     return
   }
@@ -101,10 +101,10 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
   try {
     result = await $.session.compact({ instructions: config.compactInstructions })
   } catch (err) {
-    $.ui.log(`handoff: compaction attempt ${attempt} rejected: ${errorText(err)}`, { to: 'debug' })
+    $.ui.log(`relay: compaction attempt ${attempt} rejected: ${errorText(err)}`, { to: 'debug' })
     // The person pressing Esc or Ctrl+C cancels compaction; that's a decision, not a hiccup.
     if (isCanceled(errorText(err))) {
-      await finish($, runId, 'compaction was canceled. The continuation prompt is saved: /handoff paste.')
+      await finish($, runId, 'compaction was canceled. The continuation prompt is saved: /relay paste.')
       return
     }
     if (isInteractive && attempt < COMPACT_ATTEMPTS && (await isCurrent($, runId))) {
@@ -116,12 +116,12 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
     await finish(
       $,
       runId,
-      `couldn't compact (${errorText(err)}). The continuation prompt is saved: run /compact yourself, then /handoff paste.`,
+      `couldn't compact (${errorText(err)}). The continuation prompt is saved: run /compact yourself, then /relay paste.`,
     )
     return
   }
   if (result.skip !== undefined) {
-    await finish($, runId, `compaction was skipped (${result.skip}). The continuation prompt is saved: /handoff paste.`)
+    await finish($, runId, `compaction was skipped (${result.skip}). The continuation prompt is saved: /relay paste.`)
     return
   }
   await deliver($, runId)
@@ -136,9 +136,9 @@ async function deliver($: EngineInterface, runId: number) {
     void $.prompt
       .submit({ text: forSubmit(text), asUser: true })
       .then(r => {
-        if (r.drop !== undefined) $.ui.log(`handoff: the continuation prompt was dropped (${r.drop}); /handoff paste to retry.`)
+        if (r.drop !== undefined) $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
       })
-      .catch(err => $.ui.log(`handoff: couldn't submit the continuation prompt (${errorText(err)}); /handoff paste to retry.`))
+      .catch(err => $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`))
     toast($, 'compacted; sending the continuation prompt')
     return
   }
@@ -201,7 +201,7 @@ async function submitSave($: EngineInterface, runId: number, text: string) {
     void read($, runAtom)
       .then(cur => {
         if (cur.runId === runId && cur.phase === 'saving' && cur.saveTurnId === null) {
-          return finish($, runId, "stopped: couldn't find the save turn. Nothing was compacted; /handoff to retry.")
+          return finish($, runId, "stopped: couldn't find the save turn. Nothing was compacted; /relay to retry.")
         }
       })
       .catch(() => undefined)
@@ -217,7 +217,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     isInteractive = e.isInteractive
     await $.command.register({
-      name: 'handoff',
+      name: 'relay',
       description: 'Save state to durable notes, draft a continuation prompt, compact, and queue the prompt',
       argumentHint: '[focus | status | cancel | paste]',
     })
@@ -226,7 +226,7 @@ export const register: Register = (on, options) => {
     if (run.phase === 'continuing') {
       await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
       $.ui.log(
-        'handoff: a reload interrupted the run after the save turn. If a continuation prompt was drafted, /handoff paste has it; run /compact yourself first.',
+        'relay: a reload interrupted the run after the save turn. If a continuation prompt was drafted, /relay paste has it; run /compact yourself first.',
       )
     }
     return result
@@ -262,7 +262,7 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  on('command.run', { command: 'handoff' }, async ($, e) => {
+  on('command.run', { command: 'relay' }, async ($, e) => {
     const cmd = parseArgs(e.args)
     const run = await read($, runAtom)
 
@@ -270,7 +270,7 @@ export const register: Register = (on, options) => {
       case 'status': {
         if (run.phase === 'idle') return { text: 'Idle.' }
         const minutes = run.startedAt === null ? 0 : Math.round(((await $.clock.now()) - run.startedAt) / 60_000)
-        return { text: `${run.phase === 'saving' ? 'Saving' : 'Continuing'}, started ${minutes} min ago. /handoff cancel to stop.` }
+        return { text: `${run.phase === 'saving' ? 'Saving' : 'Continuing'}, started ${minutes} min ago. /relay cancel to stop.` }
       }
 
       case 'cancel': {
@@ -294,11 +294,11 @@ export const register: Register = (on, options) => {
       }
 
       case 'start': {
-        if (run.phase !== 'idle') return { text: `Already ${run.phase}. /handoff status, or /handoff cancel to reset.` }
+        if (run.phase !== 'idle') return { text: `Already ${run.phase}. /relay status, or /relay cancel to reset.` }
         if ((await $.session.turns()) === 0) return { text: 'Nothing to hand off yet.' }
         const runId = run.runId + 1
         const startedAt = await $.clock.now()
-        const noteDir = config.noteDir || `${(await $.env.get('TMPDIR')) || '/tmp'}`.replace(/\/+$/, '') + '/claude-handoff'
+        const noteDir = config.noteDir || `${(await $.env.get('TMPDIR')) || '/tmp'}`.replace(/\/+$/, '') + '/claude-relay'
         const notePath = notePathFor(noteDir, await $.session.root(), startedAt)
         await update($, runAtom, () => ({ phase: 'saving' as const, runId, saveTurnId: null, startedAt, notePath }))
         $.ui.status('saving state…')

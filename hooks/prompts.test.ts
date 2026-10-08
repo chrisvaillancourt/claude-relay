@@ -13,7 +13,7 @@ import {
 } from './prompts'
 
 describe('parseArgs', () => {
-  test('bare /handoff starts a run with no focus', async () => {
+  test('bare /relay starts a run with no focus', async () => {
     expect(parseArgs('')).toEqual({ kind: 'start', focus: '' })
     expect(parseArgs('   ')).toEqual({ kind: 'start', focus: '' })
   })
@@ -33,9 +33,9 @@ describe('parseArgs', () => {
 
 describe('savePrompt', () => {
   test('carries the marker, the note path and the focus', async () => {
-    const p = savePrompt('the auth refactor', '/tmp/claude-handoff/x.md')
+    const p = savePrompt('the auth refactor', '/tmp/claude-relay/x.md')
     expect(p.startsWith(SAVE_MARKER)).toBe(true)
-    expect(p).toContain('/tmp/claude-handoff/x.md')
+    expect(p).toContain('/tmp/claude-relay/x.md')
     expect(p).toContain('the auth refactor')
     expect(p).not.toContain('HANDOFF.md')
     expect(savePrompt('', '/tmp/x.md')).not.toContain('Focus:')
@@ -77,7 +77,7 @@ describe('extractNote', () => {
 
 describe('isCanceled', () => {
   test("recognizes the engine's cancellation, not a running turn", async () => {
-    expect(isCanceled('handoff: $.session.compact: Compaction canceled.')).toBe(true)
+    expect(isCanceled('relay: $.session.compact: Compaction canceled.')).toBe(true)
     expect(isCanceled('Compaction cancelled by user')).toBe(true)
     expect(isCanceled('a turn is running')).toBe(false)
   })

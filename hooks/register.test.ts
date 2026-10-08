@@ -11,7 +11,7 @@ const SEC = 1000
 const CONTINUATION = '@notes/hub.md\n@notes/log.md\nResume at step 3; the staging deploy is still running.'
 const SAVE_ANSWER = '# Handoff\n\nStep 2 of 3 done; notes/hub.md is current.'
 /** Where the note lands for T0, a TMPDIR of /tmp/T/ and a project root of /work/my-proj. */
-const NOTE = '/tmp/T/claude-handoff/my-proj-20261007T150000Z.md'
+const NOTE = '/tmp/T/claude-relay/my-proj-20261007T150000Z.md'
 
 function deferred<T>() {
   let resolve!: (v: T) => void
@@ -128,7 +128,7 @@ const start = async ($: any, isInteractive = true) => {
   await $.session.start({ cwd: '/x', surface: isInteractive ? 'terminal' : null, isInteractive })
 }
 
-const handoff = ($: any, args = '') => $.command.run({ command: 'handoff', args, ...COMMAND })
+const relay = ($: any, args = '') => $.command.run({ command: 'relay', args, ...COMMAND })
 
 /** Runs the save turn the plugin submitted, ending it with `reason`. */
 const saveTurn = async ($: any, w: ReturnType<typeof world>, reason: 'answer' | 'aborted' = 'answer') => {
@@ -143,12 +143,12 @@ const saveTurn = async ($: any, w: ReturnType<typeof world>, reason: 'answer' | 
   })
 }
 
-describe('handoff', () => {
+describe('relay', () => {
   test('saves, forks the continuation, compacts, then fills the prompt box', async ($, on) => {
     const w = world(on)
     await start($)
 
-    const r = await handoff($, 'stress the rollback plan')
+    const r = await relay($, 'stress the rollback plan')
     expect(r.text).toMatch(/saving/i)
     await w.clock.advance(0)
     expect(w.submits.length).toBe(1)
@@ -168,14 +168,14 @@ describe('handoff', () => {
     expect(w.fills).toEqual([CONTINUATION])
     expect(w.copies).toEqual([CONTINUATION])
 
-    const status = await handoff($, 'status')
+    const status = await relay($, 'status')
     expect(status.text).toMatch(/idle/i)
   })
 
-  test('a turn that is not the save turn does not continue the handoff', async ($, on) => {
+  test('a turn that is not the save turn does not continue the run', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
 
     await $.turn.start({ text: 'something else', turnId: 'other' })
@@ -188,10 +188,10 @@ describe('handoff', () => {
     expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
   })
 
-  test('a subagent turn never continues the handoff', async ($, on) => {
+  test('a subagent turn never continues the run', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await $.turn.start({ text: w.submits[0]?.text ?? '', turnId: 'save-1' })
     await $.turn.complete({
@@ -206,23 +206,23 @@ describe('handoff', () => {
     expect(w.forks.length).toBe(0)
   })
 
-  test('an interrupted save turn stops the handoff before anything is compacted', async ($, on) => {
+  test('an interrupted save turn stops the run before anything is compacted', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w, 'aborted')
     await w.clock.advance(5 * SEC)
 
     expect(w.calls).toEqual(['submit'])
     expect(w.logs.some(l => /stopped/i.test(l))).toBe(true)
-    expect((await handoff($, 'status')).text).toMatch(/idle/i)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
   })
 
   test('a failed fork stops before compacting', async ($, on) => {
     const w = world(on, { forkText: null })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(5 * SEC)
@@ -234,7 +234,7 @@ describe('handoff', () => {
   test('retries compaction while a turn is still running', async ($, on) => {
     const w = world(on, { compactFailures: 2 })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(10 * SEC)
@@ -245,7 +245,7 @@ describe('handoff', () => {
   test('gives up on compaction after its retries, keeps the prompt and fills nothing', async ($, on) => {
     const w = world(on, { compactFailures: 1000 })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(5 * 60 * SEC)
@@ -253,17 +253,17 @@ describe('handoff', () => {
     // a rejection that outlasts the save turn's teardown is not retried for long
     expect(w.compacts.length).toBe(3)
     expect(w.fills.length).toBe(0)
-    expect(w.logs.some(l => /\/handoff paste/.test(l))).toBe(true)
-    expect((await handoff($, 'status')).text).toMatch(/idle/i)
+    expect(w.logs.some(l => /\/relay paste/.test(l))).toBe(true)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
 
-    await handoff($, 'paste')
+    await relay($, 'paste')
     expect(w.fills).toEqual([CONTINUATION])
   })
 
   test('a skipped compaction fills nothing and says why', async ($, on) => {
     const w = world(on, { compactSkip: 'blocked by a PreCompact hook' })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(5 * SEC)
@@ -275,7 +275,7 @@ describe('handoff', () => {
   test('submit mode sends the prompt and tells the model to read the files', { options: { deliver: 'submit' } }, async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
@@ -290,7 +290,7 @@ describe('handoff', () => {
   test('custom compaction instructions and no clipboard', { options: { compactInstructions: 'Keep the plan.', copyToClipboard: false } }, async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
@@ -302,9 +302,9 @@ describe('handoff', () => {
   test('refuses a second run while one is in progress', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
-    const again = await handoff($)
+    const again = await relay($)
     expect(again.text).toMatch(/already/i)
     expect(w.submits.length).toBe(1)
   })
@@ -312,9 +312,9 @@ describe('handoff', () => {
   test('cancel during the save turn stops the continuation', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
-    const c = await handoff($, 'cancel')
+    const c = await relay($, 'cancel')
     expect(c.text).toMatch(/cancel/i)
     await saveTurn($, w)
     await w.clock.advance(5 * SEC)
@@ -324,7 +324,7 @@ describe('handoff', () => {
   test('refuses to start in an empty conversation', async ($, on) => {
     const w = world(on, { turns: 0 })
     await start($)
-    const r = await handoff($)
+    const r = await relay($)
     expect(r.text).toMatch(/nothing/i)
     expect(w.submits.length).toBe(0)
   })
@@ -332,7 +332,7 @@ describe('handoff', () => {
   test('paste refills the last saved prompt, even from another session', async ($, on) => {
     const w = world(on, { store: { lastPrompt: { text: 'from before', at: T0 - 3600 * SEC, sessionId: 'old' } } })
     await start($)
-    const r = await handoff($, 'paste')
+    const r = await relay($, 'paste')
     expect(w.fills).toEqual(['from before'])
     expect(r.text).toMatch(/old/)
   })
@@ -340,14 +340,14 @@ describe('handoff', () => {
   test('paste with nothing saved says so', async ($, on) => {
     const w = world(on)
     await start($)
-    const r = await handoff($, 'paste')
+    const r = await relay($, 'paste')
     expect(w.fills.length).toBe(0)
     expect(r.text).toMatch(/no /i)
   })
   test('headless: a compaction rejection is not retried', async ($, on) => {
     const w = world(on, { compactFailures: 1000 })
     await start($, false)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(60 * SEC)
@@ -359,7 +359,7 @@ describe('handoff', () => {
   test('a turn that starts after the save turn stops the run before compacting', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await $.turn.start({ text: 'a prompt the person queued', turnId: 'next' })
@@ -367,26 +367,26 @@ describe('handoff', () => {
 
     expect(w.calls).toEqual(['submit', 'fork'])
     expect(w.logs.some(l => /new turn started/.test(l))).toBe(true)
-    expect((await handoff($, 'status')).text).toMatch(/idle/i)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
   })
 
   test('cancel during the fork keeps the previous saved prompt and the clipboard', async ($, on) => {
     const gate = deferred<void>()
     const w = world(on, { forkGate: gate.p, store: { lastPrompt: { text: 'good one', at: T0, sessionId: 'sid-1' } } })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(0)
     expect(w.calls).toEqual(['submit', 'fork'])
 
-    await handoff($, 'cancel')
+    await relay($, 'cancel')
     gate.resolve()
     await w.clock.advance(5 * SEC)
 
     expect(w.copies.length).toBe(0)
     expect(w.calls).toEqual(['submit', 'fork'])
-    await handoff($, 'paste')
+    await relay($, 'paste')
     expect(w.fills).toEqual(['good one'])
   })
 
@@ -394,17 +394,17 @@ describe('handoff', () => {
     const gate = deferred<void>()
     const w = world(on, { compactGate: gate.p, compactFailures: 1 })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(0)
     expect(w.calls).toEqual(['submit', 'fork', 'compact'])
 
-    await handoff($, 'cancel')
-    await handoff($, 'second run')
+    await relay($, 'cancel')
+    await relay($, 'second run')
     gate.resolve()
     await new Promise<void>(r => setTimeout(() => r(), 10))
-    await handoff($, 'cancel')
+    await relay($, 'cancel')
     await w.clock.advance(10 * SEC)
 
     // the second cancel stopped the second run's save prompt; the stale run retried nothing
@@ -415,7 +415,7 @@ describe('handoff', () => {
   test('a reload during the save turn keeps the run', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await $.turn.start({ text: w.submits[0]?.text ?? '', turnId: 'save-1' })
     await start($) // a hot reload fires session.start again
@@ -429,44 +429,44 @@ describe('handoff', () => {
     const gate = deferred<void>()
     const w = world(on, { compactGate: gate.p })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(0)
     await start($)
 
-    expect((await handoff($, 'status')).text).toMatch(/idle/i)
-    expect(w.logs.some(l => /reload/.test(l) && /\/handoff paste/.test(l))).toBe(true)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
+    expect(w.logs.some(l => /reload/.test(l) && /\/relay paste/.test(l))).toBe(true)
   })
 
   test('a save turn the marker never matched times out instead of hanging', async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await $.turn.start({ text: 'rewritten by another plugin', turnId: 'save-1' })
     await $.turn.complete({ answer: 'x', durationMs: 1, isAborted: false, turnId: 'save-1', reason: 'answer' })
     await w.clock.advance(10 * SEC)
 
     expect(w.forks.length).toBe(0)
-    expect((await handoff($, 'status')).text).toMatch(/idle/i)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
     expect(w.logs.some(l => /couldn't find the save turn/.test(l))).toBe(true)
   })
 
   test('a dropped save prompt stops the run', async ($, on) => {
     const w = world(on, { dropSubmit: t => (t.startsWith(SAVE_MARKER) ? 'blocked' : undefined) })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
 
-    expect((await handoff($, 'status')).text).toMatch(/idle/i)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
     expect(w.logs.some(l => /dropped \(blocked\)/.test(l))).toBe(true)
   })
 
   test('filling keeps a draft the person typed, after the continuation prompt', async ($, on) => {
     const w = world(on, { draft: 'also check the logs' })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
@@ -477,7 +477,7 @@ describe('handoff', () => {
   test('a box that refuses the fill gets the prompt in the transcript', async ($, on) => {
     const w = world(on, { fillOk: false })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
@@ -488,7 +488,7 @@ describe('handoff', () => {
   test('submit mode: a dropped continuation prompt is reported', { options: { deliver: 'submit' } }, async ($, on) => {
     const w = world(on, { dropSubmit: t => (t.startsWith(SAVE_MARKER) ? undefined : 'blocked') })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
@@ -500,7 +500,7 @@ describe('handoff', () => {
   test('a fork reply that is only an empty fence stops before compacting', async ($, on) => {
     const w = world(on, { forkText: '```\n```' })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
@@ -511,7 +511,7 @@ describe('handoff', () => {
   test('an empty final message saves nothing and stops before forking', async ($, on) => {
     const w = world(on, { answer: '   ' })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(5 * SEC)
@@ -524,7 +524,7 @@ describe('handoff', () => {
   test('a note that cannot be written stops before forking', async ($, on) => {
     const w = world(on, { writeFails: true })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(5 * SEC)
@@ -536,18 +536,18 @@ describe('handoff', () => {
   test('with no TMPDIR the note goes under /tmp', async ($, on) => {
     const w = world(on, { tmpdir: null })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
 
-    expect(w.writes[0]?.path).toBe('/tmp/claude-handoff/my-proj-20261007T150000Z.md')
+    expect(w.writes[0]?.path).toBe('/tmp/claude-relay/my-proj-20261007T150000Z.md')
   })
 
   test('noteDir overrides the temp directory', { options: { noteDir: '/scratch/handoffs/' } }, async ($, on) => {
     const w = world(on)
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     expect(w.submits[0]?.text).toContain('/scratch/handoffs/my-proj-20261007T150000Z.md')
     await saveTurn($, w)
@@ -558,7 +558,7 @@ describe('handoff', () => {
   test('only the tagged note is saved', async ($, on) => {
     const w = world(on, { answer: 'Nothing was stale.\n\n<handoff-note>\n# Handoff\nStep 2.\n</handoff-note>' })
     await start($)
-    await handoff($)
+    await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)

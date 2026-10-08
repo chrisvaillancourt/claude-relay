@@ -1,11 +1,11 @@
 {
-  "name": "handoff",
+  "name": "relay",
   "owner": {
     "name": "Chris Vaillancourt"
   },
   "plugins": [
     {
-      "name": "handoff",
+      "name": "relay",
       "source": "./"
     }
   ],

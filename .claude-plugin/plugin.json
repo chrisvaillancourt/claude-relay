@@ -1,7 +1,7 @@
 {
-  "name": "handoff",
-  "version": "0.1.0",
-  "description": "/handoff: update stale docs, save a handoff note to a temp file, draft a continuation prompt, compact, and put the prompt in the box.",
+  "name": "relay",
+  "version": "0.2.0",
+  "description": "/relay: update stale docs, save a handoff note to a temp file, draft a continuation prompt, compact, and put the prompt in the box.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "deliver": {
@@ -20,7 +20,7 @@
     "noteDir": {
       "type": "string",
       "title": "Handoff note directory",
-      "description": "Where the plugin writes each handoff note. Empty: the system temp directory's claude-handoff/ ($TMPDIR, else /tmp), which the OS may clear on reboot.",
+      "description": "Where the plugin writes each handoff note. Empty: the system temp directory's claude-relay/ ($TMPDIR, else /tmp), which the OS may clear on reboot.",
       "default": ""
     },
     "copyToClipboard": {

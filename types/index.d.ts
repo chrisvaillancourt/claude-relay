@@ -4,7 +4,7 @@ export type Config = {
   deliver: Deliver
   compactInstructions: string
   copyToClipboard: boolean
-  /** Where handoff notes go; empty for the system temp directory's claude-handoff/. */
+  /** Where handoff notes go; empty for the system temp directory's claude-relay/. */
   noteDir: string
 }
 
@@ -25,7 +25,7 @@ export type Run = {
   notePath: string | null
 }
 
-/** The last continuation prompt, kept in $.store across sessions for /handoff paste. */
+/** The last continuation prompt, kept in $.store across sessions for /relay paste. */
 export type SavedPrompt = {
   text: string
   at: number
@@ -40,6 +40,6 @@ export type Command =
 
 declare module 'claude-code' {
   interface PluginState {
-    handoff: { run: Run }
+    relay: { run: Run }
   }
 }
