@@ -32,6 +32,16 @@ Tested end to end in an interactive session on Claude Code 2.1.294: save turn, n
 /handoff paste     fill the prompt box with the last continuation prompt, from any session
 ```
 
+`status`, `cancel` and `paste` are matched whole and ignore case. Any other text is the focus.
+
+Use `/handoff` mid-session to free up context and keep going: the save turn only records where things stand, and the work continues after you press Enter on the filled prompt. The save prompt tells the model not to start new work, since anything started then would be compacted half-done. So use the focus to say what the note should cover, including what you'll do next, not to give the model a task:
+
+```text
+/handoff next I'm wiring the retry logic into the uploader; make sure the note covers what that needs
+```
+
+To give the next session an instruction, type it under the filled prompt before pressing Enter; the prompt is placed ahead of anything you'd already typed.
+
 ## Options
 
 Set in `/config` (or `pluginConfigs.handoff.options` in settings):
@@ -50,7 +60,7 @@ The save and continuation prompts live in `hooks/prompts.ts`.
 This repo is its own marketplace. From a local clone:
 
 ```sh
-claude plugin marketplace add ~/dev/github/chrisvaillancourt/claude-handoff
+claude plugin marketplace add /path/to/claude-handoff
 claude plugin install handoff@handoff --scope user
 ```
 
