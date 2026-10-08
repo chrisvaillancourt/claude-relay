@@ -9,7 +9,9 @@ declare const setTimeout: (fn: () => void, ms: number) => unknown
 const T0 = Date.UTC(2026, 9, 7, 15, 0)
 const SEC = 1000
 const CONTINUATION = '@notes/hub.md\n@notes/log.md\nResume at step 3; the staging deploy is still running.'
-const SAVE_ANSWER = 'Saved to notes/hub.md and notes/log.md.'
+const SAVE_ANSWER = '# Handoff\n\nStep 2 of 3 done; notes/hub.md is current.'
+/** Where the note lands for T0, a TMPDIR of /tmp/T/ and a project root of /work/my-proj. */
+const NOTE = '/tmp/T/claude-handoff/my-proj-20261007T150000Z.md'
 
 function deferred<T>() {
   let resolve!: (v: T) => void
@@ -32,12 +34,24 @@ type WorldOpts = {
   fillOk?: boolean
   dropSubmit?: (text: string) => string | undefined
   store?: Record<string, unknown>
+  /** TMPDIR as the environment has it; null for unset. */
+  tmpdir?: string | null
+  writeFails?: boolean
+  answer?: string
 }
 
 /** The engine beneath the plugin, recording what the plugin asked of it, in order. */
 const world = (on: On, opts: WorldOpts = {}) => {
   const clock = mock.clock(on, { now: T0 })
   mock.store(on, opts.store ?? {})
+  mock.env(on, opts.tmpdir === null ? {} : { TMPDIR: opts.tmpdir ?? '/tmp/T/' })
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', ($, e) => {
+    if (opts.writeFails) return { deny: 'read-only file system' }
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('session.root', () => ({ value: '/work/my-proj' }))
   const calls: string[] = []
   const submits: { text: string; asUser?: boolean }[] = []
   const forks: string[] = []
@@ -105,7 +119,7 @@ const world = (on: On, opts: WorldOpts = {}) => {
   })
   on('ui.status', () => ({ value: undefined }))
 
-  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts }
+  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, writes, answer: opts.answer ?? SAVE_ANSWER }
 }
 
 const COMMAND = { origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } }
@@ -121,7 +135,7 @@ const saveTurn = async ($: any, w: ReturnType<typeof world>, reason: 'answer' | 
   const text = w.submits.at(-1)?.text ?? ''
   await $.turn.start({ text, turnId: 'save-1' })
   await $.turn.complete({
-    answer: SAVE_ANSWER,
+    answer: w.answer,
     durationMs: 30 * SEC,
     isAborted: reason === 'aborted',
     turnId: 'save-1',
@@ -146,8 +160,10 @@ describe('handoff', () => {
     await w.clock.advance(SEC)
 
     expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
-    expect(w.forks).toEqual([continuationPrompt(SAVE_ANSWER)])
-    expect(w.forks[0]).toContain(SAVE_ANSWER)
+    expect(w.submits[0]?.text).toContain(NOTE)
+    expect(w.writes).toEqual([{ path: NOTE, text: `${SAVE_ANSWER}\n` }])
+    expect(w.forks).toEqual([continuationPrompt(SAVE_ANSWER, NOTE)])
+    expect(w.forks[0]).toContain(`@${NOTE}`)
     expect(w.compacts).toEqual(["Keep any information that's helpful to the agent and not written to a durable location."])
     expect(w.fills).toEqual([CONTINUATION])
     expect(w.copies).toEqual([CONTINUATION])
@@ -491,5 +507,63 @@ describe('handoff', () => {
 
     expect(w.calls).toEqual(['submit', 'fork'])
     expect(w.logs.some(l => /empty/.test(l))).toBe(true)
+  })
+  test('an empty final message saves nothing and stops before forking', async ($, on) => {
+    const w = world(on, { answer: '   ' })
+    await start($)
+    await handoff($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(5 * SEC)
+
+    expect(w.writes.length).toBe(0)
+    expect(w.calls).toEqual(['submit'])
+    expect(w.logs.some(l => /no handoff note/.test(l))).toBe(true)
+  })
+
+  test('a note that cannot be written stops before forking', async ($, on) => {
+    const w = world(on, { writeFails: true })
+    await start($)
+    await handoff($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(5 * SEC)
+
+    expect(w.calls).toEqual(['submit'])
+    expect(w.logs.some(l => /read-only file system/.test(l))).toBe(true)
+  })
+
+  test('with no TMPDIR the note goes under /tmp', async ($, on) => {
+    const w = world(on, { tmpdir: null })
+    await start($)
+    await handoff($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    expect(w.writes[0]?.path).toBe('/tmp/claude-handoff/my-proj-20261007T150000Z.md')
+  })
+
+  test('noteDir overrides the temp directory', { options: { noteDir: '/scratch/handoffs/' } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await handoff($)
+    await w.clock.advance(0)
+    expect(w.submits[0]?.text).toContain('/scratch/handoffs/my-proj-20261007T150000Z.md')
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    expect(w.writes[0]?.path).toBe('/scratch/handoffs/my-proj-20261007T150000Z.md')
+  })
+  test('only the tagged note is saved', async ($, on) => {
+    const w = world(on, { answer: 'Nothing was stale.\n\n<handoff-note>\n# Handoff\nStep 2.\n</handoff-note>' })
+    await start($)
+    await handoff($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    expect(w.writes).toEqual([{ path: NOTE, text: '# Handoff\nStep 2.\n' }])
+    expect(w.forks[0]).not.toContain('Nothing was stale')
   })
 })

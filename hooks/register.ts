@@ -1,7 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, Timer } from 'claude-code'
 
-import { cleanContinuation, continuationPrompt, forSubmit, parseArgs, SAVE_MARKER, savePrompt } from './prompts'
+import {
+  cleanContinuation,
+  continuationPrompt,
+  extractNote,
+  forSubmit,
+  isCanceled,
+  notePathFor,
+  parseArgs,
+  SAVE_MARKER,
+  savePrompt,
+} from './prompts'
 import type { Config, Run, SavedPrompt } from '../types'
 
 /** A compaction right after the save turn may still see it running; retry briefly, then give up. */
@@ -12,7 +22,7 @@ const SAVE_TURN_WATCHDOG_MS = 5000
 const DEFAULT_COMPACT_INSTRUCTIONS =
   "Keep any information that's helpful to the agent and not written to a durable location."
 
-const IDLE: Run = { phase: 'idle', runId: 0, saveTurnId: null, startedAt: null }
+const IDLE: Run = { phase: 'idle', runId: 0, saveTurnId: null, startedAt: null, notePath: null }
 
 const runAtom = atom({ plugin: 'handoff', key: 'run' } as const, IDLE)
 
@@ -30,6 +40,7 @@ function configFrom(options: PluginOptions): Config {
     deliver: options.deliver === 'submit' ? 'submit' : 'fill',
     compactInstructions: instructions || DEFAULT_COMPACT_INSTRUCTIONS,
     copyToClipboard: options.copyToClipboard !== false,
+    noteDir: typeof options.noteDir === 'string' ? options.noteDir.trim() : '',
   }
 }
 
@@ -91,6 +102,11 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
     result = await $.session.compact({ instructions: config.compactInstructions })
   } catch (err) {
     $.ui.log(`handoff: compaction attempt ${attempt} rejected: ${errorText(err)}`, { to: 'debug' })
+    // The person pressing Esc or Ctrl+C cancels compaction; that's a decision, not a hiccup.
+    if (isCanceled(errorText(err))) {
+      await finish($, runId, 'compaction was canceled. The continuation prompt is saved: /handoff paste.')
+      return
+    }
     if (isInteractive && attempt < COMPACT_ATTEMPTS && (await isCurrent($, runId))) {
       timer = $.clock.after(COMPACT_RETRY_MS, () => {
         compact($, runId, attempt + 1).catch(e => finish($, runId, `stopped: ${errorText(e)}`))
@@ -131,13 +147,24 @@ async function deliver($: EngineInterface, runId: number) {
   if (isFilled) toast($, 'compacted; review the prompt and press Enter')
 }
 
-/** After the save turn: fork the continuation prompt, keep it, then compact and deliver. */
-async function continueRun($: EngineInterface, runId: number, answer: string) {
+/** After the save turn: write its note, fork the continuation prompt, keep it, then compact and deliver. */
+async function continueRun($: EngineInterface, runId: number, answer: string, notePath: string) {
+  const note = extractNote(answer)
   try {
     if (!(await isCurrent($, runId))) return
+    if (!note) {
+      await finish($, runId, 'stopped: the save turn ended with no handoff note. Nothing was compacted.')
+      return
+    }
+    try {
+      await $.fs.write(notePath, `${note}\n`)
+    } catch (err) {
+      await finish($, runId, `stopped: couldn't write the handoff note to ${notePath} (${errorText(err)}). Nothing was compacted.`)
+      return
+    }
     $.ui.status('writing the continuation prompt…')
-    // The fork replays the last request, which ends before the save turn's final answer.
-    const reply = await $.model.fork({ prompt: continuationPrompt(answer) })
+    // The fork replays the last request, which ends before the note, so the note rides along.
+    const reply = await $.model.fork({ prompt: continuationPrompt(note, notePath) })
     if (!(await isCurrent($, runId))) return
     if (!reply.isAnswered) {
       await finish($, runId, `stopped: the continuation prompt failed (${reply.reason}). Nothing was compacted.`)
@@ -227,10 +254,11 @@ export const register: Register = (on, options) => {
     const now = await update($, runAtom, cur =>
       cur.runId === run.runId && cur.phase === 'saving' ? { ...cur, phase: 'continuing' as const } : cur,
     )
-    if (now.runId !== run.runId || now.phase !== 'continuing') return result
+    if (now.runId !== run.runId || now.phase !== 'continuing' || now.notePath === null) return result
+    const notePath = now.notePath
     // Compaction rejects while a turn runs, so continue once this one has ended.
     cancelTimer()
-    timer = $.clock.after(0, () => void continueRun($, run.runId, e.answer))
+    timer = $.clock.after(0, () => void continueRun($, run.runId, e.answer, notePath))
     return result
   })
 
@@ -270,11 +298,13 @@ export const register: Register = (on, options) => {
         if ((await $.session.turns()) === 0) return { text: 'Nothing to hand off yet.' }
         const runId = run.runId + 1
         const startedAt = await $.clock.now()
-        await update($, runAtom, () => ({ phase: 'saving' as const, runId, saveTurnId: null, startedAt }))
+        const noteDir = config.noteDir || `${(await $.env.get('TMPDIR')) || '/tmp'}`.replace(/\/+$/, '') + '/claude-handoff'
+        const notePath = notePathFor(noteDir, await $.session.root(), startedAt)
+        await update($, runAtom, () => ({ phase: 'saving' as const, runId, saveTurnId: null, startedAt, notePath }))
         $.ui.status('saving state…')
         // The host refuses a submit from inside command.run (it would wait on
         // the turn this hook holds), so submit once the command has returned.
-        const text = savePrompt(cmd.focus)
+        const text = savePrompt(cmd.focus, notePath)
         cancelTimer()
         timer = $.clock.after(0, () => {
           submitSave($, runId, text).catch(err =>

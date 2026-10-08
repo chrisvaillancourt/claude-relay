@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cleanContinuation, CONTINUATION_PROMPT, continuationPrompt, forSubmit, parseArgs, SAVE_MARKER, savePrompt } from './prompts'
+import {
+  cleanContinuation,
+  CONTINUATION_PROMPT,
+  continuationPrompt,
+  extractNote,
+  forSubmit,
+  isCanceled,
+  parseArgs,
+  SAVE_MARKER,
+  savePrompt,
+} from './prompts'
 
 describe('parseArgs', () => {
   test('bare /handoff starts a run with no focus', async () => {
@@ -22,11 +32,13 @@ describe('parseArgs', () => {
 })
 
 describe('savePrompt', () => {
-  test('carries the marker and the focus', async () => {
-    const p = savePrompt('the auth refactor')
+  test('carries the marker, the note path and the focus', async () => {
+    const p = savePrompt('the auth refactor', '/tmp/claude-handoff/x.md')
     expect(p.startsWith(SAVE_MARKER)).toBe(true)
+    expect(p).toContain('/tmp/claude-handoff/x.md')
     expect(p).toContain('the auth refactor')
-    expect(savePrompt('')).not.toContain('Focus:')
+    expect(p).not.toContain('HANDOFF.md')
+    expect(savePrompt('', '/tmp/x.md')).not.toContain('Focus:')
   })
 })
 
@@ -52,6 +64,25 @@ describe('cleanContinuation', () => {
   })
 })
 
+describe('extractNote', () => {
+  test('takes what is inside the note tags, dropping chatter around them', async () => {
+    expect(extractNote('No docs were stale.\n\n<handoff-note>\n# Handoff\nStep 2.\n</handoff-note>\nDone.')).toBe('# Handoff\nStep 2.')
+  })
+
+  test('falls back to the whole message without tags', async () => {
+    expect(extractNote('  # Handoff\nStep 2.  ')).toBe('# Handoff\nStep 2.')
+    expect(extractNote('<handoff-note>\n</handoff-note>')).toBe('')
+  })
+})
+
+describe('isCanceled', () => {
+  test("recognizes the engine's cancellation, not a running turn", async () => {
+    expect(isCanceled('handoff: $.session.compact: Compaction canceled.')).toBe(true)
+    expect(isCanceled('Compaction cancelled by user')).toBe(true)
+    expect(isCanceled('a turn is running')).toBe(false)
+  })
+})
+
 describe('forSubmit', () => {
   test('tells the model to read the @ files, since a plugin prompt does not attach them', async () => {
     const out = forSubmit('@notes/hub.md\nContinue the rollout.')
@@ -61,14 +92,14 @@ describe('forSubmit', () => {
 })
 
 describe('continuationPrompt', () => {
-  test('quotes the save turn reply ahead of the question', async () => {
-    const p = continuationPrompt('Wrote notes/hub.md.')
-    expect(p).toContain('<checkpoint-reply>\nWrote notes/hub.md.\n</checkpoint-reply>')
+  test('quotes the note and asks for its path first', async () => {
+    const p = continuationPrompt('# Handoff\nStep 2 done.', '/tmp/h.md')
+    expect(p).toContain('<handoff-note path="/tmp/h.md">\n# Handoff\nStep 2 done.\n</handoff-note>')
+    expect(p).toContain('@/tmp/h.md')
     expect(p.endsWith(CONTINUATION_PROMPT)).toBe(true)
   })
 
-  test('an empty reply leaves just the question, and a long one is cut', async () => {
-    expect(continuationPrompt('  ')).toBe(CONTINUATION_PROMPT)
-    expect(continuationPrompt('x'.repeat(20_000)).length).toBeLessThan(9_000)
+  test('a long note is cut in the quote', async () => {
+    expect(continuationPrompt('x'.repeat(20_000), '/tmp/h.md').length).toBeLessThan(9_500)
   })
 })

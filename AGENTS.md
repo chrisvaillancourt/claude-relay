@@ -4,7 +4,7 @@ A Claude Code mod (function-hook plugin): `/handoff` runs a save turn, forks a c
 
 ## Layout
 
-- `hooks/prompts.ts`: pure text and parsing (`savePrompt`, `CONTINUATION_PROMPT`, `cleanContinuation`, `forSubmit`, `parseArgs`). No `$`. Unit-tested in `prompts.test.ts`.
+- `hooks/prompts.ts`: pure text and parsing (`notePathFor`, `savePrompt`, `extractNote`, `continuationPrompt`, `cleanContinuation`, `forSubmit`, `isCanceled`, `parseArgs`). No `$`. Unit-tested in `prompts.test.ts`.
 - `hooks/register.ts`: wiring. Hooks (`session.start`, `turn.start`, `turn.complete`, `command.run`), the run's state machine, timers, logging.
 - `types/index.d.ts`: types and the `$.state` contract (`PluginState['handoff']`). Every `$.state` key the module uses must be declared here.
 - `.claude-plugin/plugin.json`: manifest and `userConfig`. `marketplace.json` makes the repo its own marketplace.
@@ -25,7 +25,9 @@ Both must pass before every commit. A behavior change needs a test in `hooks/*.t
   - `$.prompt.submit` is refused from inside a `command.run` hook (it would wait on the turn the hook holds). Submit from a `$.clock.after(0, …)` timer.
   - `$.session.compact` rejects while a turn runs, so the continuation starts from a timer after `turn.complete`. In live tests the first attempt succeeded; a rejection is retried twice (interactive only) and logged to the debug log. Headless sessions reject it outright ("not available in a headless session yet").
   - A plugin's submitted prompt never expands `@` mentions. That's why `fill` is the default delivery.
-  - `$.model.fork` replays the last request, which ends before the turn's final answer, so `turn.complete`'s `answer` is quoted into the fork prompt.
+  - `$.model.fork` replays the last request, which ends before the turn's final answer, so the note (from `turn.complete`'s `answer`) is quoted into the fork prompt.
+  - The plugin, not the model, writes the handoff note (`$.fs.write` creates directories). A model `Write` outside the project raises a permission prompt. Models add chatter around the note despite instructions, so the note is asked for inside `<handoff-note>` tags and `extractNote` keeps only the inside.
+  - A compaction the person cancels rejects with "Compaction canceled."; `isCanceled` stops the run instead of retrying. The test kit can't make a mocked event reject with chosen text (a throwing hook is skipped and the kit's fallback error surfaces), so that rule is unit-tested as a pure function.
   - The engine already prefixes `$.ui.status`, `$.ui.toast` and command output with the plugin name; don't add `handoff:` there. `$.ui.log` text reached a headless host unprefixed (not checked in the terminal), so log lines keep `handoff:`.
 - **Phases:** `idle → saving → continuing → idle`. The save turn is the first main-loop `turn.start` whose text carries `SAVE_MARKER`; only that turn's `turn.complete` continues the run. Subagent turns (`e.agentId` set) never do.
 - **No step runs after a failed one.** A failed or interrupted save turn or fork must not compact. A failed or skipped compaction must not fill the box. A main-loop turn that starts after the save turn stops the run before compaction.

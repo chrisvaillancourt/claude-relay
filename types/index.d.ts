@@ -4,6 +4,8 @@ export type Config = {
   deliver: Deliver
   compactInstructions: string
   copyToClipboard: boolean
+  /** Where handoff notes go; empty for the system temp directory's claude-handoff/. */
+  noteDir: string
 }
 
 /**
@@ -19,6 +21,8 @@ export type Run = {
   /** The save turn's id, once its turn.start is seen. */
   saveTurnId: string | null
   startedAt: number | null
+  /** Where the save turn's final message (the handoff note) is written. */
+  notePath: string | null
 }
 
 /** The last continuation prompt, kept in $.store across sessions for /handoff paste. */

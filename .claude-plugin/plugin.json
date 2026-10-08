@@ -1,7 +1,7 @@
 {
   "name": "handoff",
   "version": "0.1.0",
-  "description": "/handoff: save state to durable notes, draft a continuation prompt, compact, and put the prompt in the box.",
+  "description": "/handoff: update stale docs, save a handoff note to a temp file, draft a continuation prompt, compact, and put the prompt in the box.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "deliver": {
@@ -16,6 +16,12 @@
       "title": "Compaction instructions",
       "description": "What the compaction summary should keep, as typed after /compact.",
       "default": "Keep any information that's helpful to the agent and not written to a durable location."
+    },
+    "noteDir": {
+      "type": "string",
+      "title": "Handoff note directory",
+      "description": "Where the plugin writes each handoff note. Empty: the system temp directory's claude-handoff/ ($TMPDIR, else /tmp), which the OS may clear on reboot.",
+      "default": ""
     },
     "copyToClipboard": {
       "type": "boolean",
