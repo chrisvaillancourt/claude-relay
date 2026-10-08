@@ -64,7 +64,7 @@ claude plugin marketplace add chrisvaillancourt/claude-relay
 claude plugin install relay@relay --scope user
 ```
 
-A GitHub install runs a copy. It updates only when `version` in `plugin.json` changes: `claude plugin marketplace update relay`, then `claude plugin update relay@relay`.
+The install may say the `userConfig` options aren't set yet; until you set them, the defaults below apply. A GitHub install runs a copy. It updates only when `version` in `plugin.json` changes: `claude plugin marketplace update relay`, then `claude plugin update relay@relay`.
 
 Or from a local clone:
 
