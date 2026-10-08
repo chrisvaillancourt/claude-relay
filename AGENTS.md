@@ -40,5 +40,5 @@ Both must pass before every commit. A behavior change needs a test in `hooks/*.t
 
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).
 - Bump `version` in `plugin.json` for every release that GitHub installs should get; a folder-marketplace install reads the clone directly.
-- Closed source for now: no license file; `plugin.json` says `UNLICENSED`.
+- MIT licensed: `LICENSE` at the root, and `plugin.json` says `MIT`. The repo is public, so keep personal paths, secrets and work details out of files and commit messages.
 - Don't add Claude or AI attribution trailers to commits.

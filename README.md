@@ -57,16 +57,7 @@ The save and continuation prompts live in `hooks/prompts.ts`.
 
 ## Install
 
-This repo is its own marketplace. From a local clone:
-
-```sh
-claude plugin marketplace add /path/to/claude-handoff
-claude plugin install handoff@handoff --scope user
-```
-
-A folder marketplace is read from the clone itself. After an edit, run `/reload-plugins`; no version bump or reinstall is needed. `claude plugin list` shows `Read from: <clone>`.
-
-From GitHub, once the repo has a remote you can read:
+This repo is its own marketplace. Install from GitHub:
 
 ```sh
 claude plugin marketplace add chrisvaillancourt/claude-handoff
@@ -74,6 +65,15 @@ claude plugin install handoff@handoff --scope user
 ```
 
 A GitHub install runs a copy. It updates only when `version` in `plugin.json` changes: `claude plugin marketplace update handoff`, then `claude plugin update handoff@handoff`.
+
+Or from a local clone:
+
+```sh
+claude plugin marketplace add /path/to/claude-handoff
+claude plugin install handoff@handoff --scope user
+```
+
+A folder marketplace is read from the clone itself. After an edit, run `/reload-plugins`; no version bump or reinstall is needed. `claude plugin list` shows `Read from: <clone>`.
 
 ## Develop
 
@@ -86,4 +86,4 @@ To try it without installing: `claude --plugin-dir .`.
 
 ## License
 
-Private. All rights reserved.
+[MIT](LICENSE).
