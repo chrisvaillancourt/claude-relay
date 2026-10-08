@@ -1,0 +1,13 @@
+{
+  "name": "handoff",
+  "owner": {
+    "name": "Chris Vaillancourt"
+  },
+  "plugins": [
+    {
+      "name": "handoff",
+      "source": "./"
+    }
+  ],
+  "description": "Checkpoint, compact and continue a Claude Code session with one command."
+}

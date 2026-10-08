@@ -1,0 +1,31 @@
+{
+  "name": "handoff",
+  "version": "0.1.0",
+  "description": "/handoff: save state to durable notes, draft a continuation prompt, compact, and put the prompt in the box.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "deliver": {
+      "type": "string",
+      "title": "Deliver the continuation prompt",
+      "description": "fill: put it in the prompt box for you to review and send (@ mentions expand). submit: send it at once (a plugin's prompt doesn't expand @ mentions, so the model is told to read the files).",
+      "options": ["fill", "submit"],
+      "default": "fill"
+    },
+    "compactInstructions": {
+      "type": "string",
+      "title": "Compaction instructions",
+      "description": "What the compaction summary should keep, as typed after /compact.",
+      "default": "Keep any information that's helpful to the agent and not written to a durable location."
+    },
+    "copyToClipboard": {
+      "type": "boolean",
+      "title": "Copy the continuation prompt",
+      "description": "Also copy the continuation prompt to the clipboard as a backup.",
+      "default": true
+    }
+  },
+  "author": {
+    "name": "Chris Vaillancourt"
+  },
+  "license": "UNLICENSED"
+}
