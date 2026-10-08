@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cleanContinuation, forSubmit, parseArgs, SAVE_MARKER, savePrompt } from './prompts'
+import { cleanContinuation, CONTINUATION_PROMPT, continuationPrompt, forSubmit, parseArgs, SAVE_MARKER, savePrompt } from './prompts'
 
 describe('parseArgs', () => {
   test('bare /handoff starts a run with no focus', async () => {
@@ -36,6 +36,16 @@ describe('cleanContinuation', () => {
     expect(cleanContinuation('```text\n@a.md\n```')).toBe('@a.md')
   })
 
+  test('matches the wrapping fence by length and kind', async () => {
+    expect(cleanContinuation('````\n@a.md\n```sh\nx\n```\n````')).toBe('@a.md\n```sh\nx\n```')
+    expect(cleanContinuation('~~~\n@a.md\n~~~')).toBe('@a.md')
+  })
+
+  test('leaves separate code blocks alone rather than splicing them', async () => {
+    const two = '```sh\nmake test\n```\nRead @a.md then continue.\n```\nfoo\n```'
+    expect(cleanContinuation(two)).toBe(two)
+  })
+
   test('leaves inner fences and plain text alone', async () => {
     const inner = '@a.md\n\n```sh\nmake test\n```\n\nThen ship.'
     expect(cleanContinuation(`  ${inner}  `)).toBe(inner)
@@ -47,5 +57,18 @@ describe('forSubmit', () => {
     const out = forSubmit('@notes/hub.md\nContinue the rollout.')
     expect(out).toContain('@notes/hub.md\nContinue the rollout.')
     expect(out).toMatch(/read/i)
+  })
+})
+
+describe('continuationPrompt', () => {
+  test('quotes the save turn reply ahead of the question', async () => {
+    const p = continuationPrompt('Wrote notes/hub.md.')
+    expect(p).toContain('<checkpoint-reply>\nWrote notes/hub.md.\n</checkpoint-reply>')
+    expect(p.endsWith(CONTINUATION_PROMPT)).toBe(true)
+  })
+
+  test('an empty reply leaves just the question, and a long one is cut', async () => {
+    expect(continuationPrompt('  ')).toBe(CONTINUATION_PROMPT)
+    expect(continuationPrompt('x'.repeat(20_000)).length).toBeLessThan(9_000)
   })
 })

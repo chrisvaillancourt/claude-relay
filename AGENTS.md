@@ -23,12 +23,15 @@ Both must pass before every commit. A behavior change needs a test in `hooks/*.t
 
 - **Engine constraints, found the hard way:**
   - `$.prompt.submit` is refused from inside a `command.run` hook (it would wait on the turn the hook holds). Submit from a `$.clock.after(0, …)` timer.
-  - `$.session.compact` rejects while a turn runs, so the continuation starts from a timer after `turn.complete`, and compaction retries.
+  - `$.session.compact` rejects while a turn runs, so the continuation starts from a timer after `turn.complete`. In live tests the first attempt succeeded; a rejection is retried twice (interactive only) and logged to the debug log. Headless sessions reject it outright ("not available in a headless session yet").
   - A plugin's submitted prompt never expands `@` mentions. That's why `fill` is the default delivery.
+  - `$.model.fork` replays the last request, which ends before the turn's final answer, so `turn.complete`'s `answer` is quoted into the fork prompt.
+  - The engine already prefixes `$.ui.status`, `$.ui.toast` and command output with the plugin name; don't add `handoff:` there. `$.ui.log` text reached a headless host unprefixed (not checked in the terminal), so log lines keep `handoff:`.
 - **Phases:** `idle → saving → continuing → idle`. The save turn is the first main-loop `turn.start` whose text carries `SAVE_MARKER`; only that turn's `turn.complete` continues the run. Subagent turns (`e.agentId` set) never do.
-- **No step runs after a failed one.** A failed or interrupted save turn or fork must not compact. A failed or skipped compaction must not fill the box.
+- **No step runs after a failed one.** A failed or interrupted save turn or fork must not compact. A failed or skipped compaction must not fill the box. A main-loop turn that starts after the save turn stops the run before compaction.
+- **`saving` can't hang.** Five seconds after the save prompt's turn starts, a run whose save turn wasn't matched stops.
 - **`runId` guards stale work.** Cancel and every new run bump it; each async step re-checks `isCurrent` before acting.
-- **Hot reloads reset module variables** (timers included); `$.state` and `$.store` survive. `session.start` resets a run a reload left mid-flight.
+- **Hot reloads reset module variables** (timers included); `$.state` and `$.store` survive. `session.start` resets a run a reload left `continuing` (its timer is gone); a `saving` run survives, since its next step is the save turn's `turn.complete`.
 - Reporting is best effort and must never throw out of a hook or timer.
 
 ## Conventions
