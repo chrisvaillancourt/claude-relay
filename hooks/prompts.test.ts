@@ -40,6 +40,21 @@ describe('savePrompt', () => {
     expect(p).not.toContain('HANDOFF.md')
     expect(savePrompt('', '/tmp/x.md')).not.toContain('Focus:')
   })
+
+  test('custom save instructions replace the first step and keep the note contract', async () => {
+    const p = savePrompt('the auth refactor', '/tmp/x.md', 'Follow the closeout skill.')
+    expect(p.startsWith(SAVE_MARKER)).toBe(true)
+    expect(p).toContain('1. Follow the closeout skill.')
+    expect(p).not.toContain("Update the project's docs")
+    expect(p).toContain('<handoff-note>')
+    expect(p).toContain('/tmp/x.md')
+    expect(p).toContain("Don't start new work.")
+    expect(p).toContain('Focus: the auth refactor')
+  })
+
+  test('empty save instructions keep the default first step', async () => {
+    expect(savePrompt('', '/tmp/x.md', '')).toBe(savePrompt('', '/tmp/x.md'))
+  })
 })
 
 describe('cleanContinuation', () => {

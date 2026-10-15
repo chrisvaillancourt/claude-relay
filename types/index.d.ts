@@ -6,6 +6,8 @@ export type Config = {
   copyToClipboard: boolean
   /** Where handoff notes go; empty for the system temp directory's claude-relay/. */
   noteDir: string
+  /** Replaces the save turn's first step; empty for the default (update stale docs in place). */
+  saveInstructions: string
 }
 
 /**

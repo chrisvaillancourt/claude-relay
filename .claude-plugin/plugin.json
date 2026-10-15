@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "/relay: update stale docs, save a handoff note to a temp file, draft a continuation prompt, compact, and put the prompt in the box.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -21,6 +21,12 @@
       "type": "string",
       "title": "Handoff note directory",
       "description": "Where the plugin writes each handoff note. Empty: the system temp directory's claude-relay/ ($TMPDIR, else /tmp), which the OS may clear on reboot.",
+      "default": ""
+    },
+    "saveInstructions": {
+      "type": "string",
+      "title": "Save instructions",
+      "description": "Replaces the save turn's first step (update stale docs and notes in place), for example \"Follow the <name> skill.\" A skill named here must be one the model can invoke. The handoff note steps stay, since relay needs the tagged note. Empty: the default step.",
       "default": ""
     },
     "copyToClipboard": {

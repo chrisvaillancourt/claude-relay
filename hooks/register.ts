@@ -41,6 +41,7 @@ function configFrom(options: PluginOptions): Config {
     compactInstructions: instructions || DEFAULT_COMPACT_INSTRUCTIONS,
     copyToClipboard: options.copyToClipboard !== false,
     noteDir: typeof options.noteDir === 'string' ? options.noteDir.trim() : '',
+    saveInstructions: typeof options.saveInstructions === 'string' ? options.saveInstructions.trim() : '',
   }
 }
 
@@ -304,7 +305,7 @@ export const register: Register = (on, options) => {
         $.ui.status('saving state…')
         // The host refuses a submit from inside command.run (it would wait on
         // the turn this hook holds), so submit once the command has returned.
-        const text = savePrompt(cmd.focus, notePath)
+        const text = savePrompt(cmd.focus, notePath, config.saveInstructions)
         cancelTimer()
         timer = $.clock.after(0, () => {
           submitSave($, runId, text).catch(err =>

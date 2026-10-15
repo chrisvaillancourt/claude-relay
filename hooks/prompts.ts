@@ -13,12 +13,19 @@ export function notePathFor(dir: string, projectRoot: string, nowMs: number): st
   return `${dir.replace(/\/+$/, '')}/${project}-${stamp}.md`
 }
 
-/** The save turn's prompt: update stale docs, then end with the handoff note, which the plugin saves. */
-export function savePrompt(focus: string, notePath: string): string {
+/** The save turn's default first step, which the `saveInstructions` option replaces. */
+export const DEFAULT_SAVE_STEP =
+  "Update the project's docs and notes that this session's work made stale, in place, following CLAUDE.md / AGENTS.md. Don't create a handoff note in the project."
+
+/**
+ * The save turn's prompt: update stale docs (or follow `saveInstructions`),
+ * then end with the handoff note, which the plugin saves.
+ */
+export function savePrompt(focus: string, notePath: string, saveInstructions = ''): string {
   const lines = [
     `${SAVE_MARKER} The conversation will be compacted after this turn, and the next session starts from what you leave now.`,
     '',
-    "1. Update the project's docs and notes that this session's work made stale, in place, following CLAUDE.md / AGENTS.md. Don't create a handoff note in the project.",
+    `1. ${saveInstructions.trim() || DEFAULT_SAVE_STEP}`,
     `2. Then, after your last tool call, end with the handoff note inside <handoff-note> and </handoff-note> tags, each on its own line. What's inside the tags is saved to ${notePath} for the next session; don't write that file yourself.`,
     '3. In the note, record what is done; what is in progress, exactly where it stands (branches, uncommitted changes, running jobs, open PRs); decisions and why; what you learned; issues, gotchas and workarounds; next steps, each with a disposition (do / skip / defer); and the files you wrote or updated this session.',
     "4. Link to what's already durable instead of repeating it.",

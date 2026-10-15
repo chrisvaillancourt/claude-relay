@@ -4,7 +4,7 @@ A Claude Code mod (function-hook plugin) that turns the checkpoint-compact-conti
 
 When a session's context is getting full, `/relay`:
 
-1. **Saves.** It submits a save turn. The model updates the project's docs and notes that the session made stale, in place, then ends the turn with a handoff note inside `<handoff-note>` tags. The note covers what's done, what's in progress, decisions, lessons, gotchas, workarounds, next steps and the files touched. The plugin writes the note to a temp file, `$TMPDIR/claude-relay/<project>-<UTC time>.md` (`/tmp` when `TMPDIR` is unset), so nothing new lands in the repo. The model doesn't write that file itself, so there's no permission prompt for a path outside the project.
+1. **Saves.** It submits a save turn. The model updates the project's docs and notes that the session made stale, in place (or follows your `saveInstructions`), then ends the turn with a handoff note inside `<handoff-note>` tags. The note covers what's done, what's in progress, decisions, lessons, gotchas, workarounds, next steps and the files touched. The plugin writes the note to a temp file, `$TMPDIR/claude-relay/<project>-<UTC time>.md` (`/tmp` when `TMPDIR` is unset), so nothing new lands in the repo. The model doesn't write that file itself, so there's no permission prompt for a path outside the project.
 
    macOS clears `$TMPDIR` on reboot and removes files left unused for about 3 days. That's fine for the next session; set `noteDir` if you want notes kept longer.
 2. **Drafts the continuation prompt.** Once the save turn ends, it asks a side question over the transcript with `$.model.fork`, the cache-served, tool-less side question `/btw` asks. The fork replays the last request, which ends before the save turn's final message, so the note is quoted into the question. The answer is a copy/paste-ready prompt that points at the files to read (`@path`, the temp note first) and adds only what they don't say. The fork doesn't add the question or the answer to the conversation. The prompt is saved to the plugin's store and, by default, copied to the clipboard.
@@ -52,8 +52,19 @@ Set in `/config` (or `pluginConfigs.relay.options` in settings):
 | `compactInstructions` | Keep any information that's helpful to the agent and not written to a durable location. | What the compaction summary keeps. |
 | `noteDir` | empty | Directory for handoff notes. Empty: `$TMPDIR/claude-relay` (else `/tmp/claude-relay`). |
 | `copyToClipboard` | `true` | Also copy the continuation prompt to the clipboard. |
+| `saveInstructions` | empty | Replaces the save turn's first step (update stale docs and notes in place). See below. |
 
 The save and continuation prompts live in `hooks/prompts.ts`.
+
+### Your own save step
+
+`saveInstructions` replaces only the save turn's first step. relay still asks for the handoff note inside `<handoff-note>` tags, tells the model not to write the note file, and says not to start new work, since it needs the tagged note for the continuation prompt. Use it to run your own closeout routine, for example a skill:
+
+```text
+Follow the saving-session-state skill.
+```
+
+A skill named there must be one the model can invoke (no `disable-model-invocation`), because the save turn asks the model to load it. Whatever it runs shouldn't stop to ask questions: relay continues only once the save turn ends with the tagged note.
 
 ## Install
 

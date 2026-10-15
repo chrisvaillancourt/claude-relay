@@ -299,6 +299,17 @@ describe('relay', () => {
     expect(w.copies.length).toBe(0)
   })
 
+  test('custom save instructions reach the save prompt', { options: { saveInstructions: '  Follow the closeout skill.  ' } }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+
+    expect(w.submits[0]?.text.startsWith(SAVE_MARKER)).toBe(true)
+    expect(w.submits[0]?.text).toContain('1. Follow the closeout skill.\n')
+    expect(w.submits[0]?.text).not.toContain("Update the project's docs")
+  })
+
   test('refuses a second run while one is in progress', async ($, on) => {
     const w = world(on)
     await start($)
