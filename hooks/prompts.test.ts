@@ -94,6 +94,25 @@ describe('extractNote', () => {
     expect(extractNote('<handoff-note>\ndraft\n</handoff-note>\nRevised:\n<handoff-note>\nfinal\n</handoff-note>')).toBe('final')
   })
 
+  test('ignores tags inside a fenced example within the note', async () => {
+    const answer = [
+      'Report.',
+      '<handoff-note>',
+      '# Handoff',
+      'Draft for the ticket:',
+      '```xml',
+      '<handoff-note>',
+      'example',
+      '</handoff-note>',
+      '```',
+      'Next: resume the migration.',
+      '</handoff-note>',
+    ].join('\n')
+    expect(extractNote(answer)).toBe(
+      '# Handoff\nDraft for the ticket:\n```xml\n<handoff-note>\nexample\n</handoff-note>\n```\nNext: resume the migration.',
+    )
+  })
+
   test('falls back to the whole message without tags', async () => {
     expect(extractNote('  # Handoff\nStep 2.  ')).toBe('# Handoff\nStep 2.')
     expect(extractNote('<handoff-note>\n</handoff-note>')).toBe('')

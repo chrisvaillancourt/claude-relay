@@ -43,17 +43,45 @@ export const CONTINUATION_PROMPT =
   "Add anything else they need to know that those files don't say, without repeating what they do. " +
   'Output only the prompt: no preamble, no wrapper formatting, no code fence.'
 
-/** Tags on lines of their own, as the save prompt asks; tag names quoted in prose don't match. */
-const OWN_LINE_NOTE = /^[ \t]*<handoff-note>[ \t]*$([\s\S]*?)^[ \t]*<\/handoff-note>[ \t]*$/gm
+const OPEN_TAG = /^\s*<handoff-note>\s*$/
+const CLOSE_TAG = /^\s*<\/handoff-note>\s*$/
+const FENCE = /^\s*(`{3,}|~{3,})/
 const INLINE_NOTE = /<handoff-note>([\s\S]*?)<\/handoff-note>/g
+
+/**
+ * Blocks between tags on lines of their own, as the save prompt asks. Tag
+ * names quoted in prose don't match, and tags inside a code fence (an example
+ * in a draft) belong to the note's text.
+ */
+function ownLineNotes(answer: string): string[] {
+  const lines = answer.split(/\r?\n/)
+  const notes: string[] = []
+  let fence: string | null = null
+  let open: number | null = null
+  lines.forEach((line, i) => {
+    const marker = FENCE.exec(line)?.[1]
+    if (marker) {
+      if (fence === null) fence = marker
+      else if (marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null
+      return
+    }
+    if (fence !== null) return
+    if (OPEN_TAG.test(line)) open = i
+    else if (CLOSE_TAG.test(line) && open !== null) {
+      notes.push(lines.slice(open + 1, i).join('\n'))
+      open = null
+    }
+  })
+  return notes
+}
 
 /**
  * The note inside the save turn's <handoff-note> tags: the last block whose
  * tags sit on their own lines, else the last inline pair, else the whole message.
  */
 export function extractNote(answer: string): string {
-  const tagged = [...answer.matchAll(OWN_LINE_NOTE)].at(-1) ?? [...answer.matchAll(INLINE_NOTE)].at(-1)
-  return (tagged ? (tagged[1] ?? '') : answer).trim()
+  const note = ownLineNotes(answer).at(-1) ?? [...answer.matchAll(INLINE_NOTE)].at(-1)?.[1] ?? answer
+  return note.trim()
 }
 
 /** Longest stretch of the note quoted into the fork prompt. */
