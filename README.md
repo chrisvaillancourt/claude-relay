@@ -44,7 +44,7 @@ To give the next session an instruction, type it under the filled prompt before 
 
 ## Options
 
-Set in `/config` (or `pluginConfigs.relay.options` in settings):
+Set in `/config`, or in settings under `pluginConfigs["relay@relay"].options` (the key is the plugin id, `<plugin>@<marketplace>`):
 
 | Option | Default | |
 | --- | --- | --- |

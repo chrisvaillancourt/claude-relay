@@ -43,9 +43,16 @@ export const CONTINUATION_PROMPT =
   "Add anything else they need to know that those files don't say, without repeating what they do. " +
   'Output only the prompt: no preamble, no wrapper formatting, no code fence.'
 
-/** The note inside the save turn's <handoff-note> tags, or the whole message when it has none. */
+/** Tags on lines of their own, as the save prompt asks; tag names quoted in prose don't match. */
+const OWN_LINE_NOTE = /^[ \t]*<handoff-note>[ \t]*$([\s\S]*?)^[ \t]*<\/handoff-note>[ \t]*$/gm
+const INLINE_NOTE = /<handoff-note>([\s\S]*?)<\/handoff-note>/g
+
+/**
+ * The note inside the save turn's <handoff-note> tags: the last block whose
+ * tags sit on their own lines, else the last inline pair, else the whole message.
+ */
 export function extractNote(answer: string): string {
-  const tagged = /<handoff-note>([\s\S]*?)<\/handoff-note>/.exec(answer)
+  const tagged = [...answer.matchAll(OWN_LINE_NOTE)].at(-1) ?? [...answer.matchAll(INLINE_NOTE)].at(-1)
   return (tagged ? (tagged[1] ?? '') : answer).trim()
 }
 

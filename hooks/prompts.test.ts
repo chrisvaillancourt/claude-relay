@@ -84,6 +84,16 @@ describe('extractNote', () => {
     expect(extractNote('No docs were stale.\n\n<handoff-note>\n# Handoff\nStep 2.\n</handoff-note>\nDone.')).toBe('# Handoff\nStep 2.')
   })
 
+  test('takes the tags on their own lines, not tag names quoted in prose before them', async () => {
+    const answer =
+      'The note goes inside `<handoff-note>` and `</handoff-note>` tags:\n\n<handoff-note>\n# Widget handoff\nRelease 0.2.0.\n</handoff-note>'
+    expect(extractNote(answer)).toBe('# Widget handoff\nRelease 0.2.0.')
+  })
+
+  test('takes the last note when the message holds more than one', async () => {
+    expect(extractNote('<handoff-note>\ndraft\n</handoff-note>\nRevised:\n<handoff-note>\nfinal\n</handoff-note>')).toBe('final')
+  })
+
   test('falls back to the whole message without tags', async () => {
     expect(extractNote('  # Handoff\nStep 2.  ')).toBe('# Handoff\nStep 2.')
     expect(extractNote('<handoff-note>\n</handoff-note>')).toBe('')
