@@ -26,6 +26,8 @@ export type Hold = {
    * starts, and what arrives in between is resubmitted then.
    */
   endsAtTurn: boolean
+  /** Bumped when the hold starts or is released, so a late rollback can't revive a hold that ended. */
+  gen: number
 }
 
 /**

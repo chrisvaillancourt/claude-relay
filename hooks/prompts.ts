@@ -120,7 +120,8 @@ export function promptPathFor(notePath: string): string {
 
 /**
  * Deliveries that start a turn on their own: background tasks, other
- * sessions, schedules. Held from the save turn's end until the person's next
+ * sessions, schedules. Not `channel`: that may be the person driving the
+ * session remotely, who couldn't end a hold from there. Held from the save turn's end until the person's next
  * prompt, so none runs between the checkpoint and the continuation prompt.
  */
 const HELD_ORIGINS = new Set([
@@ -129,7 +130,6 @@ const HELD_ORIGINS = new Set([
   'peer-send-message',
   'projects-relay',
   'coordinator',
-  'channel',
   'observer',
   'observer-activity',
   'scheduled-trigger',
@@ -147,6 +147,18 @@ export function isPersonOrigin(kind: string): boolean {
 /** The hold with `text` added, or null when it isn't holding (a release won the race), so the delivery passes. */
 export function holdAppend(cur: Hold, text: string): Hold | null {
   return cur.isHolding ? { ...cur, items: [...cur.items, text] } : null
+}
+
+/**
+ * The hold after a prompt that took `taken` (when the hold was at `gen`) was
+ * refused further down, or null when the hold has been released or restarted
+ * since and must not be revived. A prompt that ended the hold gives it back,
+ * items first; one that took nothing leaves another prompt's handoff alone.
+ */
+export function restoreHold(cur: Hold, taken: readonly string[], gen: number, didEnd: boolean): Hold | null {
+  if (cur.gen !== gen) return null
+  if (!didEnd) return cur
+  return { ...cur, isHolding: true, endsAtTurn: false, items: [...taken, ...cur.items] }
 }
 
 /** The held deliveries, in the order they arrived, for the prompt that ends the hold. */
@@ -183,5 +195,6 @@ export function parseArgs(args: string): Command {
       return { kind: 'start', focus: trimmed }
   }
 }
+
 
 

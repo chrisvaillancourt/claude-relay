@@ -8,6 +8,7 @@ import {
   forSubmit,
   heldNotice,
   holdAppend,
+  restoreHold,
   isCanceled,
   isHeldOrigin,
   isPersonOrigin,
@@ -31,7 +32,7 @@ const IDLE: Run = { phase: 'idle', runId: 0, saveTurnId: null, startedAt: null, 
 
 const runAtom = atom({ plugin: 'relay', key: 'run' } as const, IDLE)
 
-const RELEASED: Hold = { isHolding: false, items: [], endsAtTurn: false }
+const RELEASED: Hold = { isHolding: false, items: [], endsAtTurn: false, gen: 0 }
 const holdAtom = atom({ plugin: 'relay', key: 'hold' } as const, RELEASED)
 
 // Module variables reset on a hot reload; `$.state` survives one. A run left
@@ -40,6 +41,8 @@ let config: Config = configFrom({})
 let timer: Timer | null = null
 /** The run whose continuation prompt went into the box as compaction started. */
 let filledEarlyRunId: number | null = null
+/** The run a main-loop turn started in after its save turn, even one that has ended since. */
+let interruptedRunId: number | null = null
 let isInteractive = true
 /** Whether a main-loop turn is running; subagents raise no turn.start. */
 let isTurnRunning = false
@@ -61,18 +64,19 @@ async function release($: EngineInterface): Promise<string[]> {
   let items: string[] = []
   await update($, holdAtom, cur => {
     items = cur.items
-    return RELEASED
+    return { ...RELEASED, gen: cur.gen + 1 }
   })
   return items
 }
 
-/** Puts `items` back at the front of the hold and keeps holding, after the prompt that took them was refused. */
-async function releaseHeld($: EngineInterface, items: readonly string[]): Promise<void> {
-  if (!items.length) {
-    await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false }))
-    return
+/** Puts held messages that couldn't be handed back in the transcript, so they aren't lost. */
+function logHeld($: EngineInterface, items: readonly string[], why: string) {
+  if (!items.length) return
+  try {
+    $.ui.log(`relay: couldn't hand back ${items.length} held message${items.length === 1 ? '' : 's'} (${why}). Here they are:\n\n${heldNotice(items)}`)
+  } catch {
+    // Best effort.
   }
-  await update($, holdAtom, cur => ({ isHolding: true, endsAtTurn: false, items: [...items, ...cur.items] }))
 }
 
 /**
@@ -84,7 +88,12 @@ async function releaseToSession($: EngineInterface): Promise<number> {
   const held = await release($)
   if (held.length) {
     $.clock.after(0, () => {
-      $.prompt.submit({ text: heldNotice(held) }).catch(() => undefined)
+      $.prompt
+        .submit({ text: heldNotice(held) })
+        .then(r => {
+          if (r.drop !== undefined) logHeld($, held, r.drop)
+        })
+        .catch(err => logHeld($, held, errorText(err)))
     })
   }
   return held.length
@@ -108,7 +117,7 @@ function toast($: EngineInterface, text: string) {
 }
 
 /** Ends run `runId` if it is still the live one, and says why; never throws. */
-async function finish($: EngineInterface, runId: number, message: string | null) {
+async function finish($: EngineInterface, runId: number, message: string | null, keepHold = false) {
   try {
     const run = await read($, runAtom)
     if (run.runId !== runId || run.phase === 'idle') return
@@ -116,7 +125,7 @@ async function finish($: EngineInterface, runId: number, message: string | null)
     $.ui.status(undefined)
     if (message) $.ui.log(`relay: ${message}`)
     // A failure leaves no continuation prompt to wait for, unless it's already in the box.
-    if (message && filledEarlyRunId !== runId) await releaseToSession($)
+    if (message && !keepHold && filledEarlyRunId !== runId) await releaseToSession($)
   } catch {
     // Reporting must never throw out of a hook or timer.
   }
@@ -137,7 +146,7 @@ async function fill($: EngineInterface, text: string): Promise<boolean> {
 /** Compacts, retrying briefly if the save turn hasn't finished tearing down. */
 async function compact($: EngineInterface, runId: number, attempt = 1): Promise<void> {
   if (!(await isCurrent($, runId))) return
-  if (isTurnRunning) {
+  if (isTurnRunning || interruptedRunId === runId) {
     await finish(
       $,
       runId,
@@ -212,7 +221,7 @@ async function deliver($: EngineInterface, runId: number) {
       .then(async r => {
         if (r.drop === undefined) return
         $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
-        if (held.length) await releaseHeld($, held)
+        logHeld($, held, r.drop)
       })
       .catch(err => $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`))
     toast($, 'compacted; sending the continuation prompt')
@@ -226,7 +235,8 @@ async function deliver($: EngineInterface, runId: number) {
     return
   }
   const isFilled = await fill($, text).catch(() => false)
-  await finish($, runId, isFilled ? null : `couldn't fill the prompt box. Continuation prompt:\n\n${text}`)
+  // A prompt that couldn't be filled is still to be sent, so the hold stays for it.
+  await finish($, runId, isFilled ? null : `couldn't fill the prompt box. Continuation prompt:\n\n${text}`, true)
   if (isFilled) toast($, 'compacted; review the prompt and press Enter')
 }
 
@@ -272,12 +282,16 @@ async function continueRun($: EngineInterface, runId: number, answer: string, no
 }
 
 /** Submits the save prompt; called from a timer, since command.run can't submit. */
-async function submitSave($: EngineInterface, runId: number, text: string) {
+async function submitSave($: EngineInterface, runId: number, text: string, carried: readonly string[]) {
   const run = await read($, runAtom)
-  if (run.runId !== runId || run.phase !== 'saving') return
+  if (run.runId !== runId || run.phase !== 'saving') {
+    logHeld($, carried, 'the run was cancelled before its save prompt went out')
+    return
+  }
   const r = await $.prompt.submit({ text, asUser: true })
   if (r.drop !== undefined) {
     await finish($, runId, `stopped: the save prompt was dropped (${r.drop}).`)
+    logHeld($, carried, 'the save prompt carrying them was dropped')
     return
   }
   // The submit resolves as the save turn starts. If turn.start didn't match the
@@ -322,11 +336,13 @@ export const register: Register = (on, options) => {
     // The person's prompt took what was held at Enter; anything since follows its turn.
     if ((await read($, holdAtom)).endsAtTurn) await releaseToSession($)
     const run = await read($, runAtom)
+    // Latched: a turn that ends before a compaction retry still counts.
+    if (run.phase === 'continuing') interruptedRunId = run.runId
     if (run.phase === 'saving' && run.saveTurnId === null && e.text.includes(SAVE_MARKER)) {
       await update($, runAtom, cur => (cur.runId === run.runId ? { ...cur, saveTurnId: e.turnId } : cur))
       // From the save turn on, a delivery that would start a turn of its own waits
       // for the continuation prompt; one into this turn carries its turnId and passes.
-      await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false }))
+      await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false, gen: cur.gen + 1 }))
     }
     return next(e)
   })
@@ -366,14 +382,28 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     if (!isPersonOrigin(e.origin.kind)) return next(e)
+    // Typed into the save turn: not the continuation prompt, so the hold goes on.
+    if (e.turnId !== undefined && e.turnId === (await read($, runAtom)).saveTurnId) return next(e)
     let taken: string[] = []
+    let gen = 0
+    let didEnd = false
     await update($, holdAtom, cur => {
-      taken = cur.endsAtTurn ? [] : cur.items
-      return { ...cur, items: cur.endsAtTurn ? cur.items : [], endsAtTurn: true }
+      gen = cur.gen
+      didEnd = !cur.endsAtTurn
+      taken = didEnd ? cur.items : []
+      return didEnd ? { ...cur, items: [], endsAtTurn: true } : cur
     })
     const result = await next(taken.length ? { ...e, context: [...(e.context ?? []), heldNotice(taken)] } : e)
-    // Refused further down: what it took goes back, ahead of anything since.
-    if (result.drop !== undefined) await releaseHeld($, taken)
+    if (result.drop !== undefined) {
+      // Refused further down: give back what it took, unless the hold has ended since.
+      let isRestored = false
+      await update($, holdAtom, cur => {
+        const back = restoreHold(cur, taken, gen, didEnd)
+        isRestored = back !== null
+        return back ?? cur
+      })
+      if (!isRestored) logHeld($, taken, 'the prompt carrying them was refused after the hold ended')
+    }
     return result
   }).catch(($, e, next) => next(e)) // a failure lets the prompt through; holding is best effort
 
@@ -434,9 +464,10 @@ export const register: Register = (on, options) => {
         const text = held.length ? `${save}\n\n${heldNotice(held)}` : save
         cancelTimer()
         timer = $.clock.after(0, () => {
-          submitSave($, runId, text).catch(err =>
-            finish($, runId, `stopped: couldn't submit the save prompt (${errorText(err)}).`),
-          )
+          submitSave($, runId, text, held).catch(err => {
+            logHeld($, held, errorText(err))
+            return finish($, runId, `stopped: couldn't submit the save prompt (${errorText(err)}).`)
+          })
         })
         return { text: 'Saving state, then drafting a continuation prompt and compacting.' }
       }

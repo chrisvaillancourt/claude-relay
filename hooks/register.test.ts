@@ -895,6 +895,95 @@ describe('background notifications wait for the continuation prompt', () => {
     expect(w.logs.some(l => /uncompacted/.test(l))).toBe(true)
   })
 
+  test('held messages handed back and refused further down go to the transcript', async ($, on) => {
+    const w = world(on, { dropSubmit: t => (t.startsWith('relay held') ? 'blocked' : undefined) })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, CONTINUATION, 'composer')
+    await arrive($, '<task-notification>late-b2</task-notification>', 'task-notification')
+    await $.turn.start({ text: CONTINUATION, turnId: 'next' })
+    await w.clock.advance(SEC)
+
+    expect(w.logs.some(l => l.includes('late-b2') && /blocked/.test(l))).toBe(true)
+  })
+
+  test('a refused replacement save puts what it carried in the transcript', async ($, on) => {
+    const w = world(on, { dropSubmit: t => (t.startsWith(SAVE_MARKER) && t.includes('prev-b1') ? 'blocked' : undefined) })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, '<task-notification>prev-b1</task-notification>', 'task-notification')
+
+    await relay($, 'again')
+    await w.clock.advance(SEC)
+    expect(w.logs.some(l => l.includes('prev-b1'))).toBe(true)
+  })
+
+  test('a second prompt refused after the first was queued leaves the first one’s handoff alone', async ($, on) => {
+    const w = world(on, { dropSubmit: t => (t === 'refused B' ? 'blocked' : undefined) })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, CONTINUATION, 'composer')
+    await arrive($, '<task-notification>b2</task-notification>', 'task-notification')
+    expect((await arrive($, 'refused B', 'composer')).drop).toBe('blocked')
+
+    await $.turn.start({ text: CONTINUATION, turnId: 'next' })
+    await w.clock.advance(SEC)
+    expect(w.submits.some(s => s.origin === 'plugin' && s.text.includes('b2'))).toBe(true)
+    expect((await relay($, 'status')).text).not.toMatch(/holding/i)
+  })
+
+  test('a prompt typed into the save turn does not end the hold', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await $.turn.start({ text: w.submits[0]?.text ?? '', turnId: 'save-1' })
+    await arrive($, '<task-notification>b1</task-notification>', 'task-notification')
+    await arrive($, 'typed during the save', 'composer', 'save-1')
+    expect(w.submits.at(-1)?.context).toBeUndefined()
+    await $.turn.complete({ answer: w.answer, durationMs: 1, isAborted: false, turnId: 'save-1', reason: 'answer' })
+    await w.clock.advance(SEC)
+
+    await arrive($, CONTINUATION, 'composer')
+    expect(w.submits.at(-1)?.context?.some(c => c.includes('b1'))).toBe(true)
+  })
+
+  test('a fill that fails at delivery keeps holding, since the prompt is still to be sent', { options: { fillDuringCompaction: false } }, async ($, on) => {
+    const w = world(on, { fillOk: false })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    expect((await arrive($, '<task-notification>b1</task-notification>', 'task-notification')).drop).toMatch(/relay/i)
+    expect(w.submits.some(s => s.origin === 'plugin' && s.text.includes('b1'))).toBe(false)
+  })
+
+  test('a turn that starts and ends inside the retry window still stops the run', async ($, on) => {
+    const w = world(on, { compactFailures: 1 })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(0)
+    await $.turn.start({ text: CONTINUATION, turnId: 'next' })
+    await $.turn.complete({ answer: 'x', durationMs: 1, isAborted: false, turnId: 'next', reason: 'answer' })
+    await w.clock.advance(5 * SEC)
+
+    expect(w.compacts.length).toBe(1)
+    expect(w.logs.some(l => /uncompacted/.test(l))).toBe(true)
+  })
+
   test('submit mode: the held notifications ride along with the continuation prompt', { options: { deliver: 'submit' } }, async ($, on) => {
     const gate = deferred<void>()
     const w = world(on, { compactGate: gate.p })

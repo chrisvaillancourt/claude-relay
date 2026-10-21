@@ -8,6 +8,7 @@ import {
   forSubmit,
   heldNotice,
   holdAppend,
+  restoreHold,
   isCanceled,
   isHeldOrigin,
   parseArgs,
@@ -178,8 +179,21 @@ describe('heldNotice', () => {
 
 describe('holdAppend', () => {
   test('appends only while holding, so a delivery racing a release passes instead', async () => {
-    expect(holdAppend({ isHolding: true, items: ['a'], endsAtTurn: false }, 'b')).toEqual({ isHolding: true, items: ['a', 'b'], endsAtTurn: false })
-    expect(holdAppend({ isHolding: false, items: [], endsAtTurn: false }, 'b')).toBeNull()
+    expect(holdAppend({ isHolding: true, items: ['a'], endsAtTurn: false, gen: 1 }, 'b')).toEqual({ isHolding: true, items: ['a', 'b'], endsAtTurn: false, gen: 1 })
+    expect(holdAppend({ isHolding: false, items: [], endsAtTurn: false, gen: 1 }, 'b')).toBeNull()
+  })
+})
+
+describe('restoreHold', () => {
+  const holding = { isHolding: true, items: ['later'], endsAtTurn: true, gen: 3 }
+  test('a refused prompt that ended the hold puts its items back first and holds again', async () => {
+    expect(restoreHold(holding, ['taken'], 3, true)).toEqual({ isHolding: true, items: ['taken', 'later'], endsAtTurn: false, gen: 3 })
+  })
+  test('a refused prompt that took nothing leaves another prompt’s handoff alone', async () => {
+    expect(restoreHold(holding, [], 3, false)).toEqual(holding)
+  })
+  test('a hold released or restarted since (cancel, a new run) is not revived', async () => {
+    expect(restoreHold({ isHolding: false, items: [], endsAtTurn: false, gen: 4 }, ['taken'], 3, true)).toBeNull()
   })
 })
 
@@ -191,13 +205,13 @@ describe('isHeldOrigin', () => {
       'peer-send-message',
       'projects-relay',
       'coordinator',
-      'channel',
       'observer',
       'observer-activity',
       'scheduled-trigger',
     ])
       expect(isHeldOrigin(kind)).toBe(true)
-    for (const kind of ['composer', 'bridge', 'sdk', 'slack-ping', 'plugin', 'auto-continuation', 'unclassified'])
+    // a channel may be the person driving the session remotely, who couldn't end a hold from there
+    for (const kind of ['composer', 'bridge', 'sdk', 'slack-ping', 'channel', 'plugin', 'auto-continuation', 'unclassified'])
       expect(isHeldOrigin(kind)).toBe(false)
   })
 })
