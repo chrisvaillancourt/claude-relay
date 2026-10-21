@@ -1,4 +1,4 @@
-import type { Command } from '../types'
+import type { Command, Hold } from '../types'
 
 /** Leads the save prompt, so the save turn can be told apart by its text. */
 export const SAVE_MARKER = '[relay] Checkpoint before compaction.'
@@ -127,6 +127,9 @@ const HELD_ORIGINS = new Set([
   'task-notification',
   'peer',
   'peer-send-message',
+  'projects-relay',
+  'coordinator',
+  'channel',
   'observer',
   'observer-activity',
   'scheduled-trigger',
@@ -139,6 +142,11 @@ export function isHeldOrigin(kind: string): boolean {
 /** The person's own prompt, which ends the hold. */
 export function isPersonOrigin(kind: string): boolean {
   return kind === 'composer' || kind === 'bridge' || kind === 'sdk' || kind === 'slack-ping'
+}
+
+/** The hold with `text` added, or null when it isn't holding (a release won the race), so the delivery passes. */
+export function holdAppend(cur: Hold, text: string): Hold | null {
+  return cur.isHolding ? { ...cur, items: [...cur.items, text] } : null
 }
 
 /** The held deliveries, in the order they arrived, for the prompt that ends the hold. */
@@ -175,4 +183,5 @@ export function parseArgs(args: string): Command {
       return { kind: 'start', focus: trimmed }
   }
 }
+
 

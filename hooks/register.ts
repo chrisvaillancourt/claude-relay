@@ -7,6 +7,7 @@ import {
   extractNote,
   forSubmit,
   heldNotice,
+  holdAppend,
   isCanceled,
   isHeldOrigin,
   isPersonOrigin,
@@ -30,7 +31,7 @@ const IDLE: Run = { phase: 'idle', runId: 0, saveTurnId: null, startedAt: null, 
 
 const runAtom = atom({ plugin: 'relay', key: 'run' } as const, IDLE)
 
-const RELEASED: Hold = { isHolding: false, items: [] }
+const RELEASED: Hold = { isHolding: false, items: [], endsAtTurn: false }
 const holdAtom = atom({ plugin: 'relay', key: 'hold' } as const, RELEASED)
 
 // Module variables reset on a hot reload; `$.state` survives one. A run left
@@ -65,6 +66,30 @@ async function release($: EngineInterface): Promise<string[]> {
   return items
 }
 
+/** Puts `items` back at the front of the hold and keeps holding, after the prompt that took them was refused. */
+async function releaseHeld($: EngineInterface, items: readonly string[]): Promise<void> {
+  if (!items.length) {
+    await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false }))
+    return
+  }
+  await update($, holdAtom, cur => ({ isHolding: true, endsAtTurn: false, items: [...items, ...cur.items] }))
+}
+
+/**
+ * Ends the hold and hands what it held back to the session as relay's own
+ * message, which runs once the session is idle. From a timer, since a hook
+ * that submits would wait on itself.
+ */
+async function releaseToSession($: EngineInterface): Promise<number> {
+  const held = await release($)
+  if (held.length) {
+    $.clock.after(0, () => {
+      $.prompt.submit({ text: heldNotice(held) }).catch(() => undefined)
+    })
+  }
+  return held.length
+}
+
 function cancelTimer() {
   timer?.cancel()
   timer = null
@@ -90,6 +115,8 @@ async function finish($: EngineInterface, runId: number, message: string | null)
     await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId } : cur))
     $.ui.status(undefined)
     if (message) $.ui.log(`relay: ${message}`)
+    // A failure leaves no continuation prompt to wait for, unless it's already in the box.
+    if (message && filledEarlyRunId !== runId) await releaseToSession($)
   } catch {
     // Reporting must never throw out of a hook or timer.
   }
@@ -114,7 +141,9 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
     await finish(
       $,
       runId,
-      'stopped: a new turn started before compaction. The continuation prompt is saved: /compact, then /relay paste.',
+      filledEarlyRunId === runId
+        ? 'stopped: a turn started while compaction was retrying. If it was the continuation prompt, it ran on the uncompacted conversation; /compact, then /relay paste, to start over.'
+        : 'stopped: a new turn started before compaction. The continuation prompt is saved: /compact, then /relay paste.',
     )
     return
   }
@@ -139,6 +168,7 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
       return
     }
     if (isInteractive && attempt < COMPACT_ATTEMPTS && (await isCurrent($, runId))) {
+      if (filledEarlyRunId === runId) $.ui.status("compaction is retrying; don't send the prompt yet…")
       timer = $.clock.after(COMPACT_RETRY_MS, () => {
         compact($, runId, attempt + 1).catch(e => finish($, runId, `stopped: ${errorText(e)}`))
       })
@@ -179,8 +209,10 @@ async function deliver($: EngineInterface, runId: number) {
     const body = held.length ? `${forSubmit(text)}\n\n${heldNotice(held)}` : forSubmit(text)
     void $.prompt
       .submit({ text: body, asUser: true })
-      .then(r => {
-        if (r.drop !== undefined) $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
+      .then(async r => {
+        if (r.drop === undefined) return
+        $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
+        if (held.length) await releaseHeld($, held)
       })
       .catch(err => $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`))
     toast($, 'compacted; sending the continuation prompt')
@@ -287,9 +319,14 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     isTurnRunning = true
+    // The person's prompt took what was held at Enter; anything since follows its turn.
+    if ((await read($, holdAtom)).endsAtTurn) await releaseToSession($)
     const run = await read($, runAtom)
     if (run.phase === 'saving' && run.saveTurnId === null && e.text.includes(SAVE_MARKER)) {
       await update($, runAtom, cur => (cur.runId === run.runId ? { ...cur, saveTurnId: e.turnId } : cur))
+      // From the save turn on, a delivery that would start a turn of its own waits
+      // for the continuation prompt; one into this turn carries its turnId and passes.
+      await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false }))
     }
     return next(e)
   })
@@ -309,8 +346,6 @@ export const register: Register = (on, options) => {
     )
     if (now.runId !== run.runId || now.phase !== 'continuing' || now.notePath === null) return result
     const notePath = now.notePath
-    // From here until the person's next prompt, background deliveries wait.
-    await update($, holdAtom, cur => ({ ...cur, isHolding: true }))
     // Compaction rejects while a turn runs, so continue once this one has ended.
     cancelTimer()
     timer = $.clock.after(0, () => void continueRun($, run.runId, e.answer, notePath))
@@ -318,16 +353,28 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    const hold = await read($, holdAtom)
-    if (!hold.isHolding) return next(e)
+    if (!(await read($, holdAtom)).isHolding) return next(e)
     // One delivered into a running turn starts no turn of its own.
     if (isHeldOrigin(e.origin.kind) && e.turnId === undefined) {
-      await update($, holdAtom, cur => ({ ...cur, items: [...cur.items, e.text] }))
-      return { drop: 'relay is holding this until you send the continuation prompt; it goes along with that prompt.' }
+      let isCaptured = false
+      await update($, holdAtom, cur => {
+        const held = holdAppend(cur, e.text)
+        isCaptured = held !== null
+        return held ?? cur
+      })
+      if (isCaptured) return { drop: 'relay is holding this until you send the continuation prompt; it goes along with that prompt.' }
+      return next(e)
     }
     if (!isPersonOrigin(e.origin.kind)) return next(e)
-    const held = await release($)
-    return held.length ? next({ ...e, context: [...(e.context ?? []), heldNotice(held)] }) : next(e)
+    let taken: string[] = []
+    await update($, holdAtom, cur => {
+      taken = cur.endsAtTurn ? [] : cur.items
+      return { ...cur, items: cur.endsAtTurn ? cur.items : [], endsAtTurn: true }
+    })
+    const result = await next(taken.length ? { ...e, context: [...(e.context ?? []), heldNotice(taken)] } : e)
+    // Refused further down: what it took goes back, ahead of anything since.
+    if (result.drop !== undefined) await releaseHeld($, taken)
+    return result
   }).catch(($, e, next) => next(e)) // a failure lets the prompt through; holding is best effort
 
   on('command.run', { command: 'relay' }, async ($, e) => {
@@ -336,24 +383,26 @@ export const register: Register = (on, options) => {
 
     switch (cmd.kind) {
       case 'status': {
-        if (run.phase === 'idle') return { text: 'Idle.' }
+        const hold = await read($, holdAtom)
+        const holding = hold.isHolding
+          ? ` Holding ${hold.items.length} background message${hold.items.length === 1 ? '' : 's'} until your next prompt; /relay cancel releases them.`
+          : ''
+        if (run.phase === 'idle') return { text: `Idle.${holding}` }
         const minutes = run.startedAt === null ? 0 : Math.round(((await $.clock.now()) - run.startedAt) / 60_000)
-        return { text: `${run.phase === 'saving' ? 'Saving' : 'Continuing'}, started ${minutes} min ago. /relay cancel to stop.` }
+        return { text: `${run.phase === 'saving' ? 'Saving' : 'Continuing'}, started ${minutes} min ago. /relay cancel to stop.${holding}` }
       }
 
       case 'cancel': {
-        if (run.phase === 'idle') return { text: 'Nothing to cancel.' }
-        cancelTimer()
-        await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
-        $.ui.status(undefined)
-        const held = await release($)
-        // command.run can't submit (it would wait on this hook), so from a timer.
-        if (held.length) {
-          $.clock.after(0, () => {
-            $.prompt.submit({ text: heldNotice(held) }).catch(() => undefined)
-          })
+        const hold = await read($, holdAtom)
+        if (run.phase === 'idle' && !hold.isHolding) return { text: 'Nothing to cancel.' }
+        if (run.phase !== 'idle') {
+          cancelTimer()
+          await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
+          $.ui.status(undefined)
         }
-        return { text: 'Cancelled. Anything already saved or compacted stays.' }
+        const released = await releaseToSession($)
+        const note = released ? ` Released ${released} held message${released === 1 ? '' : 's'}.` : ''
+        return { text: `Cancelled. Anything already saved or compacted stays.${note}` }
       }
 
       case 'paste': {

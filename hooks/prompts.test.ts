@@ -7,6 +7,7 @@ import {
   extractNote,
   forSubmit,
   heldNotice,
+  holdAppend,
   isCanceled,
   isHeldOrigin,
   parseArgs,
@@ -169,13 +170,32 @@ describe('heldNotice', () => {
   test('carries every held message, in order, and says why they waited', async () => {
     const out = heldNotice(['<task-notification>a</task-notification>', 'Another Claude session sent a message: b'])
     expect(out).toMatch(/relay/i)
+    expect(out).toContain('<task-notification>a</task-notification>')
+    expect(out).toContain('Another Claude session sent a message: b')
     expect(out.indexOf('>a<')).toBeLessThan(out.indexOf(': b'))
+  })
+})
+
+describe('holdAppend', () => {
+  test('appends only while holding, so a delivery racing a release passes instead', async () => {
+    expect(holdAppend({ isHolding: true, items: ['a'], endsAtTurn: false }, 'b')).toEqual({ isHolding: true, items: ['a', 'b'], endsAtTurn: false })
+    expect(holdAppend({ isHolding: false, items: [], endsAtTurn: false }, 'b')).toBeNull()
   })
 })
 
 describe('isHeldOrigin', () => {
   test('holds background deliveries, never the person or a plugin', async () => {
-    for (const kind of ['task-notification', 'peer', 'peer-send-message', 'observer', 'observer-activity', 'scheduled-trigger'])
+    for (const kind of [
+      'task-notification',
+      'peer',
+      'peer-send-message',
+      'projects-relay',
+      'coordinator',
+      'channel',
+      'observer',
+      'observer-activity',
+      'scheduled-trigger',
+    ])
       expect(isHeldOrigin(kind)).toBe(true)
     for (const kind of ['composer', 'bridge', 'sdk', 'slack-ping', 'plugin', 'auto-continuation', 'unclassified'])
       expect(isHeldOrigin(kind)).toBe(false)

@@ -14,12 +14,18 @@ export type Config = {
 
 /**
  * Background deliveries (task notifications, other sessions' messages) held
- * from the save turn's end until the person's next prompt, which carries them.
+ * from the save turn's start until the person's next prompt, which carries
+ * them, and until that prompt's turn starts.
  */
 export type Hold = {
   isHolding: boolean
   /** The held prompts' text, in arrival order. */
   items: string[]
+  /**
+   * The person's prompt took what was held; the hold lasts until its turn
+   * starts, and what arrives in between is resubmitted then.
+   */
+  endsAtTurn: boolean
 }
 
 /**
