@@ -33,6 +33,8 @@ type WorldOpts = {
   draft?: string
   fillOk?: boolean
   dropSubmit?: (text: string) => string | undefined
+  /** Makes the submit reject (the kit skips a throwing mock and rejects with its fallback error). */
+  throwSubmit?: (text: string) => boolean
   store?: Record<string, unknown>
   /** TMPDIR as the environment has it; null for unset. */
   tmpdir?: string | null
@@ -78,6 +80,7 @@ const world = (on: On, opts: WorldOpts = {}) => {
       origin: e.origin.kind,
       context: e.context,
     })
+    if (opts.throwSubmit?.(e.text)) throw new Error('submit failed')
     const drop = opts.dropSubmit?.(e.text)
     if (drop !== undefined) return { drop }
     return { text: e.text, origin: e.origin }
@@ -982,6 +985,39 @@ describe('background notifications wait for the continuation prompt', () => {
 
     expect(w.compacts.length).toBe(1)
     expect(w.logs.some(l => /uncompacted/.test(l))).toBe(true)
+  })
+
+  test('submit mode: a continuation submit that fails logs what it carried', { options: { deliver: 'submit' } }, async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p, throwSubmit: t => t.includes(CONTINUATION) })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, '<task-notification>sm-b1</task-notification>', 'task-notification')
+
+    gate.resolve()
+    await w.clock.advance(SEC)
+    expect(w.logs.some(l => /couldn't submit the continuation prompt/.test(l))).toBe(true)
+    expect(w.logs.some(l => l.includes('sm-b1'))).toBe(true)
+  })
+
+  test('cancelling a new /relay before its save prompt goes out releases what it would have carried', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, '<task-notification>rc-b1</task-notification>', 'task-notification')
+
+    await relay($, 'again')
+    await relay($, 'cancel') // before the save prompt's timer runs
+    await w.clock.advance(SEC)
+    const carried = w.submits.some(s => s.text.includes('rc-b1'))
+    const logged = w.logs.some(l => l.includes('rc-b1'))
+    expect(carried || logged).toBe(true)
   })
 
   test('submit mode: the held notifications ride along with the continuation prompt', { options: { deliver: 'submit' } }, async ($, on) => {

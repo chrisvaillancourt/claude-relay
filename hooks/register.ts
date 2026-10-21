@@ -64,7 +64,7 @@ async function release($: EngineInterface): Promise<string[]> {
   let items: string[] = []
   await update($, holdAtom, cur => {
     items = cur.items
-    return { ...RELEASED, gen: cur.gen + 1 }
+    return { ...RELEASED, gen: (cur.gen ?? 0) + 1 }
   })
   return items
 }
@@ -223,7 +223,10 @@ async function deliver($: EngineInterface, runId: number) {
         $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
         logHeld($, held, r.drop)
       })
-      .catch(err => $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`))
+      .catch(err => {
+        $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`)
+        logHeld($, held, errorText(err))
+      })
     toast($, 'compacted; sending the continuation prompt')
     return
   }
@@ -282,13 +285,20 @@ async function continueRun($: EngineInterface, runId: number, answer: string, no
 }
 
 /** Submits the save prompt; called from a timer, since command.run can't submit. */
-async function submitSave($: EngineInterface, runId: number, text: string, carried: readonly string[]) {
+async function submitSave($: EngineInterface, runId: number, save: string) {
   const run = await read($, runAtom)
-  if (run.runId !== runId || run.phase !== 'saving') {
-    logHeld($, carried, 'the run was cancelled before its save prompt went out')
-    return
+  if (run.runId !== runId || run.phase !== 'saving') return
+  // Anything still held from an earlier run goes to this save turn. Taken only
+  // now, so a cancel before this timer runs releases it with the rest.
+  const carried = await release($)
+  const text = carried.length ? `${save}\n\n${heldNotice(carried)}` : save
+  let r
+  try {
+    r = await $.prompt.submit({ text, asUser: true })
+  } catch (err) {
+    logHeld($, carried, errorText(err))
+    throw err
   }
-  const r = await $.prompt.submit({ text, asUser: true })
   if (r.drop !== undefined) {
     await finish($, runId, `stopped: the save prompt was dropped (${r.drop}).`)
     logHeld($, carried, 'the save prompt carrying them was dropped')
@@ -342,7 +352,7 @@ export const register: Register = (on, options) => {
       await update($, runAtom, cur => (cur.runId === run.runId ? { ...cur, saveTurnId: e.turnId } : cur))
       // From the save turn on, a delivery that would start a turn of its own waits
       // for the continuation prompt; one into this turn carries its turnId and passes.
-      await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false, gen: cur.gen + 1 }))
+      await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false, gen: (cur.gen ?? 0) + 1 }))
     }
     return next(e)
   })
@@ -388,7 +398,7 @@ export const register: Register = (on, options) => {
     let gen = 0
     let didEnd = false
     await update($, holdAtom, cur => {
-      gen = cur.gen
+      gen = cur.gen ?? 0
       didEnd = !cur.endsAtTurn
       taken = didEnd ? cur.items : []
       return didEnd ? { ...cur, items: [], endsAtTurn: true } : cur
@@ -458,16 +468,12 @@ export const register: Register = (on, options) => {
         $.ui.status('saving state…')
         // The host refuses a submit from inside command.run (it would wait on
         // the turn this hook holds), so submit once the command has returned.
-        // Anything still held from an earlier run goes to this save turn.
-        const held = await release($)
         const save = savePrompt(cmd.focus, notePath, config.saveInstructions)
-        const text = held.length ? `${save}\n\n${heldNotice(held)}` : save
         cancelTimer()
         timer = $.clock.after(0, () => {
-          submitSave($, runId, text, held).catch(err => {
-            logHeld($, held, errorText(err))
-            return finish($, runId, `stopped: couldn't submit the save prompt (${errorText(err)}).`)
-          })
+          submitSave($, runId, save).catch(err =>
+            finish($, runId, `stopped: couldn't submit the save prompt (${errorText(err)}).`),
+          )
         })
         return { text: 'Saving state, then drafting a continuation prompt and compacting.' }
       }

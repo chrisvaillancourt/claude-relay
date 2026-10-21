@@ -120,9 +120,10 @@ export function promptPathFor(notePath: string): string {
 
 /**
  * Deliveries that start a turn on their own: background tasks, other
- * sessions, schedules. Not `channel`: that may be the person driving the
- * session remotely, who couldn't end a hold from there. Held from the save turn's end until the person's next
- * prompt, so none runs between the checkpoint and the continuation prompt.
+ * sessions, schedules. Held from the save turn's start until the person's
+ * next prompt's turn starts, so none runs between the checkpoint and the
+ * continuation prompt. Not `channel`: that may be the person driving the
+ * session remotely, who couldn't end a hold from there.
  */
 const HELD_ORIGINS = new Set([
   'task-notification',
@@ -156,7 +157,7 @@ export function holdAppend(cur: Hold, text: string): Hold | null {
  * items first; one that took nothing leaves another prompt's handoff alone.
  */
 export function restoreHold(cur: Hold, taken: readonly string[], gen: number, didEnd: boolean): Hold | null {
-  if (cur.gen !== gen) return null
+  if ((cur.gen ?? 0) !== gen) return null
   if (!didEnd) return cur
   return { ...cur, isHolding: true, endsAtTurn: false, items: [...taken, ...cur.items] }
 }
@@ -195,6 +196,3 @@ export function parseArgs(args: string): Command {
       return { kind: 'start', focus: trimmed }
   }
 }
-
-
-
