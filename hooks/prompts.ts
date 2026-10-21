@@ -39,7 +39,8 @@ export function savePrompt(focus: string, notePath: string, saveInstructions = '
 /** The side question asked over the transcript once the save turn ends (what `/btw` would be asked). */
 export const CONTINUATION_PROMPT =
   'Give me a concise, copy/paste-ready prompt to continue in the next session. ' +
-  'Point to the files the next agent should read immediately, each path prefixed with `@`. ' +
+  'Open with one line saying what to continue, then a line reading "Come up to speed:" and the files the next agent should read first, one per line, each path prefixed with `@`. ' +
+  "The harness attaches the @ files and loads AGENTS.md, CLAUDE.md and other instruction files by itself, so don't tell the agent to read them, and don't list instruction files. " +
   "Add anything else they need to know that those files don't say, without repeating what they do. " +
   'Output only the prompt: no preamble, no wrapper formatting, no code fence.'
 
@@ -112,6 +113,42 @@ export function cleanContinuation(text: string): string {
   return opensAgain ? trimmed : inner.trim()
 }
 
+/** Where the generated continuation prompt is kept: beside its note, so it can be compared with what was sent. */
+export function promptPathFor(notePath: string): string {
+  return /\.md$/.test(notePath) ? notePath.replace(/\.md$/, '.prompt.md') : `${notePath}.prompt.md`
+}
+
+/**
+ * Deliveries that start a turn on their own: background tasks, other
+ * sessions, schedules. Held from the save turn's end until the person's next
+ * prompt, so none runs between the checkpoint and the continuation prompt.
+ */
+const HELD_ORIGINS = new Set([
+  'task-notification',
+  'peer',
+  'peer-send-message',
+  'observer',
+  'observer-activity',
+  'scheduled-trigger',
+])
+
+export function isHeldOrigin(kind: string): boolean {
+  return HELD_ORIGINS.has(kind)
+}
+
+/** The person's own prompt, which ends the hold. */
+export function isPersonOrigin(kind: string): boolean {
+  return kind === 'composer' || kind === 'bridge' || kind === 'sdk' || kind === 'slack-ping'
+}
+
+/** The held deliveries, in the order they arrived, for the prompt that ends the hold. */
+export function heldNotice(items: readonly string[]): string {
+  return (
+    'relay held these messages while it compacted the conversation, so none would start a turn before the continuation prompt. They arrived in this order:\n\n' +
+    items.join('\n\n')
+  )
+}
+
 /** A plugin's submitted prompt doesn't expand `@` mentions, so the model is told to read them. */
 export function forSubmit(text: string): string {
   return `Read every file below whose path is prefixed with @ before doing anything else (they are not attached automatically), then continue.\n\n${text}`
@@ -138,3 +175,4 @@ export function parseArgs(args: string): Command {
       return { kind: 'start', focus: trimmed }
   }
 }
+

@@ -8,6 +8,18 @@ export type Config = {
   noteDir: string
   /** Replaces the save turn's first step; empty for the default (update stale docs in place). */
   saveInstructions: string
+  /** Fill the box as compaction starts (true) or once it has finished (false). */
+  fillDuringCompaction: boolean
+}
+
+/**
+ * Background deliveries (task notifications, other sessions' messages) held
+ * from the save turn's end until the person's next prompt, which carries them.
+ */
+export type Hold = {
+  isHolding: boolean
+  /** The held prompts' text, in arrival order. */
+  items: string[]
 }
 
 /**
@@ -42,6 +54,6 @@ export type Command =
 
 declare module 'claude-code' {
   interface PluginState {
-    relay: { run: Run }
+    relay: { run: Run; hold: Hold }
   }
 }

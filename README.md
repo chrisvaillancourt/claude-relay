@@ -7,21 +7,23 @@ When a session's context is getting full, `/relay`:
 1. **Saves.** It submits a save turn. The model updates the project's docs and notes that the session made stale, in place (or follows your `saveInstructions`), then ends the turn with a handoff note inside `<handoff-note>` tags. The note covers what's done, what's in progress, decisions, lessons, gotchas, workarounds, next steps and the files touched. The plugin writes the note to a temp file, `$TMPDIR/claude-relay/<project>-<UTC time>.md` (`/tmp` when `TMPDIR` is unset), so nothing new lands in the repo. The model doesn't write that file itself, so there's no permission prompt for a path outside the project.
 
    macOS clears `$TMPDIR` on reboot and removes files left unused for about 3 days. That's fine for the next session; set `noteDir` if you want notes kept longer.
-2. **Drafts the continuation prompt.** Once the save turn ends, it asks a side question over the transcript with `$.model.fork`, the cache-served, tool-less side question `/btw` asks. The fork replays the last request, which ends before the save turn's final message, so the note is quoted into the question. The answer is a copy/paste-ready prompt that points at the files to read (`@path`, the temp note first) and adds only what they don't say. The fork doesn't add the question or the answer to the conversation. The prompt is saved to the plugin's store and, by default, copied to the clipboard.
+2. **Drafts the continuation prompt.** Once the save turn ends, it asks a side question over the transcript with `$.model.fork`, the cache-served, tool-less side question `/btw` asks. The fork replays the last request, which ends before the save turn's final message, so the note is quoted into the question. The answer is a copy/paste-ready prompt: one line on what to continue, then "Come up to speed:" and the files to read (`@path`, the temp note first), plus only what those files don't say. It doesn't tell the agent to read the `@` files or instruction files such as `AGENTS.md` and `CLAUDE.md`, since the harness attaches and loads those itself. The fork doesn't add the question or the answer to the conversation. The prompt is saved to the plugin's store, written beside the note as `<note>.prompt.md` (so you can compare it with what you sent), and, by default, copied to the clipboard.
 3. **Compacts.** It runs the same compaction `/compact` does, with your instructions (default: keep what's helpful and not written to a durable location).
-4. **Delivers.** It fills the prompt box with the continuation prompt, ahead of anything you'd typed there. Review it and press Enter. A typed prompt expands `@` mentions; a plugin's submitted prompt doesn't.
+4. **Delivers.** It fills the prompt box with the continuation prompt, ahead of anything you'd typed there, as compaction starts. Review it and press Enter: pressed while compaction runs, Enter queues the prompt to run once compaction finishes. A typed prompt expands `@` mentions; a plugin's submitted prompt doesn't. Set `fillDuringCompaction` to `false` to fill only after compaction.
+
+From the end of the save turn until you send your next prompt, relay holds background deliveries that would start a turn on their own: a background shell or agent finishing, another session's message, a scheduled prompt. Each is dropped with a note saying relay is holding it, and they're attached to your next prompt as context, in the order they arrived. So nothing runs between the checkpoint and the continuation prompt, and a notification right after the save turn no longer stops the run. A delivery into a running turn isn't held. `/relay cancel` releases what's held as a message from relay.
 
 If any step fails, the run stops before the next one and logs why:
 
 - A failed or interrupted save turn, a missing note, a note that can't be written, or a failed fork never compacts.
 - If you cancel the compaction (Esc or Ctrl+C), the run stops; the prompt stays saved for `/relay paste`.
 - If you start another turn before compaction (say, a prompt you queued during the save turn), the run stops rather than compacting over it.
-- If compaction fails or is skipped, nothing is filled; the prompt stays saved for `/relay paste`. A rejected compaction is retried twice, 2 s apart, in case the save turn is still winding down.
+- If compaction fails or is skipped, the prompt is already in the box (with `fillDuringCompaction` off, nothing is filled and the prompt stays saved for `/relay paste`). The log says to run `/compact` before sending it; a prompt you already queued runs on the uncompacted conversation. A rejected compaction is retried twice, 2 s apart, in case the save turn is still winding down.
 - If the save turn can't be identified within 5 s of starting (another plugin rewrote the prompt), the run stops.
 
 Headless sessions (`-p`, SDK) can't compact from a plugin on Claude Code 2.1.294, so there `/relay` saves and drafts the prompt, then stops with the prompt saved.
 
-Tested end to end in an interactive session on Claude Code 2.1.294: save turn, note written to `$TMPDIR`, fork, compaction (35k → 3k tokens) and fill. Pressing Enter on the filled prompt attached the temp note through its `@` path with no permission prompt.
+Tested end to end in an interactive session on Claude Code 2.1.294: save turn, note written to `$TMPDIR`, fork, compaction (35k → 3k tokens) and fill. Pressing Enter on the filled prompt attached the temp note through its `@` path with no permission prompt. 0.4.0's fill during compaction and the hold are covered by `claude plugin test`; whether Enter during a compaction queues the prompt is the engine's behavior and is still to be checked live.
 
 ## Command
 
@@ -53,6 +55,7 @@ Set in `/config`, or in settings under `pluginConfigs["relay@relay"].options` (t
 | `noteDir` | empty | Directory for handoff notes. Empty: `$TMPDIR/claude-relay` (else `/tmp/claude-relay`). |
 | `copyToClipboard` | `true` | Also copy the continuation prompt to the clipboard. |
 | `saveInstructions` | empty | Replaces the save turn's first step (update stale docs and notes in place). See below. |
+| `fillDuringCompaction` | `true` | With `deliver: fill`, fill the box as compaction starts, so you can queue the prompt. `false`: fill once compaction has finished. |
 
 The save and continuation prompts live in `hooks/prompts.ts`.
 

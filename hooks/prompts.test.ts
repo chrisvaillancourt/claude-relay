@@ -6,8 +6,11 @@ import {
   continuationPrompt,
   extractNote,
   forSubmit,
+  heldNotice,
   isCanceled,
+  isHeldOrigin,
   parseArgs,
+  promptPathFor,
   SAVE_MARKER,
   savePrompt,
 } from './prompts'
@@ -145,5 +148,36 @@ describe('continuationPrompt', () => {
 
   test('a long note is cut in the quote', async () => {
     expect(continuationPrompt('x'.repeat(20_000), '/tmp/h.md').length).toBeLessThan(9_500)
+  })
+
+  test("introduces the @ files with 'Come up to speed:' and leaves instruction files to the harness", async () => {
+    expect(CONTINUATION_PROMPT).toContain('Come up to speed:')
+    expect(CONTINUATION_PROMPT).toMatch(/AGENTS\.md/)
+    expect(CONTINUATION_PROMPT).toMatch(/don't tell the agent to read them/i)
+    expect(CONTINUATION_PROMPT).not.toMatch(/Point to the files/)
+  })
+})
+
+describe('promptPathFor', () => {
+  test('keeps the generated prompt beside its note', async () => {
+    expect(promptPathFor('/tmp/claude-relay/work-20261021T194550Z.md')).toBe('/tmp/claude-relay/work-20261021T194550Z.prompt.md')
+    expect(promptPathFor('/tmp/x/note')).toBe('/tmp/x/note.prompt.md')
+  })
+})
+
+describe('heldNotice', () => {
+  test('carries every held message, in order, and says why they waited', async () => {
+    const out = heldNotice(['<task-notification>a</task-notification>', 'Another Claude session sent a message: b'])
+    expect(out).toMatch(/relay/i)
+    expect(out.indexOf('>a<')).toBeLessThan(out.indexOf(': b'))
+  })
+})
+
+describe('isHeldOrigin', () => {
+  test('holds background deliveries, never the person or a plugin', async () => {
+    for (const kind of ['task-notification', 'peer', 'peer-send-message', 'observer', 'observer-activity', 'scheduled-trigger'])
+      expect(isHeldOrigin(kind)).toBe(true)
+    for (const kind of ['composer', 'bridge', 'sdk', 'slack-ping', 'plugin', 'auto-continuation', 'unclassified'])
+      expect(isHeldOrigin(kind)).toBe(false)
   })
 })

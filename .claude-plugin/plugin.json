@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "/relay: update stale docs, save a handoff note to a temp file, draft a continuation prompt, compact, and put the prompt in the box.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -8,7 +8,10 @@
       "type": "string",
       "title": "Deliver the continuation prompt",
       "description": "fill: put it in the prompt box for you to review and send (@ mentions expand). submit: send it at once (a plugin's prompt doesn't expand @ mentions, so the model is told to read the files).",
-      "options": ["fill", "submit"],
+      "options": [
+        "fill",
+        "submit"
+      ],
       "default": "fill"
     },
     "compactInstructions": {
@@ -33,6 +36,12 @@
       "type": "boolean",
       "title": "Copy the continuation prompt",
       "description": "Also copy the continuation prompt to the clipboard as a backup.",
+      "default": true
+    },
+    "fillDuringCompaction": {
+      "type": "boolean",
+      "title": "Fill the prompt box while compacting",
+      "description": "With deliver fill: put the continuation prompt in the box as compaction starts, so you can press Enter to queue it before a background task finishes. Off: fill it once compaction has finished.",
       "default": true
     }
   },

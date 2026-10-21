@@ -53,7 +53,9 @@ const world = (on: On, opts: WorldOpts = {}) => {
   })
   on('session.root', () => ({ value: '/work/my-proj' }))
   const calls: string[] = []
-  const submits: { text: string; asUser?: boolean }[] = []
+  const submits: { text: string; asUser?: boolean; origin: string; context?: readonly string[] }[] = []
+  /** What the prompt box holds: the person's draft, then whatever the plugin filled. */
+  const box = { text: opts.draft ?? '' }
   const forks: string[] = []
   const compacts: (string | undefined)[] = []
   const fills: string[] = []
@@ -70,12 +72,17 @@ const world = (on: On, opts: WorldOpts = {}) => {
   on('session.turns', () => ({ value: opts.turns ?? 5 }))
   on('prompt.submit', ($, e) => {
     calls.push('submit')
-    submits.push({ text: e.text, asUser: e.origin.kind === 'plugin' ? e.origin.asUser : undefined })
+    submits.push({
+      text: e.text,
+      asUser: e.origin.kind === 'plugin' ? e.origin.asUser : undefined,
+      origin: e.origin.kind,
+      context: e.context,
+    })
     const drop = opts.dropSubmit?.(e.text)
     if (drop !== undefined) return { drop }
     return { text: e.text, origin: e.origin }
   })
-  on('prompt.read', () => ({ value: { text: opts.draft ?? '', cursor: 0 } }))
+  on('prompt.read', () => ({ value: { text: box.text, cursor: 0 } }))
   on('model.fork', async ($, e) => {
     calls.push('fork')
     forks.push(e.prompt)
@@ -103,7 +110,9 @@ const world = (on: On, opts: WorldOpts = {}) => {
   on('prompt.fill', ($, e) => {
     calls.push('fill')
     fills.push(e.text)
-    return { isFilled: opts.fillOk ?? true }
+    const isFilled = opts.fillOk ?? true
+    if (isFilled) box.text = e.text
+    return { isFilled }
   })
   on('ui.copy', ($, e) => {
     copies.push(e.text)
@@ -119,8 +128,12 @@ const world = (on: On, opts: WorldOpts = {}) => {
   })
   on('ui.status', () => ({ value: undefined }))
 
-  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, writes, answer: opts.answer ?? SAVE_ANSWER }
+  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, writes, box, answer: opts.answer ?? SAVE_ANSWER }
 }
+
+/** A prompt the engine queued from somewhere other than the plugin: a background task, or the person's Enter. */
+const arrive = ($: any, text: string, kind: 'task-notification' | 'peer' | 'composer', turnId?: string) =>
+  $.prompt.submit({ text, origin: { kind }, wait: false, ...(turnId ? { turnId } : {}) })
 
 const COMMAND = { origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } }
 
@@ -161,7 +174,7 @@ describe('relay', () => {
 
     expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
     expect(w.submits[0]?.text).toContain(NOTE)
-    expect(w.writes).toEqual([{ path: NOTE, text: `${SAVE_ANSWER}\n` }])
+    expect(w.writes[0]).toEqual({ path: NOTE, text: `${SAVE_ANSWER}\n` })
     expect(w.forks).toEqual([continuationPrompt(SAVE_ANSWER, NOTE)])
     expect(w.forks[0]).toContain(`@${NOTE}`)
     expect(w.compacts).toEqual(["Keep any information that's helpful to the agent and not written to a durable location."])
@@ -239,10 +252,25 @@ describe('relay', () => {
     await saveTurn($, w)
     await w.clock.advance(10 * SEC)
 
-    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'compact', 'compact', 'fill'])
+    // the box is filled once, as the first attempt starts
+    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill', 'compact', 'compact'])
+    expect(w.toasts.some(t => /review the prompt/.test(t))).toBe(true)
   })
 
-  test('gives up on compaction after its retries, keeps the prompt and fills nothing', async ($, on) => {
+  test('gives up on compaction after its retries, and warns about the prompt already in the box', async ($, on) => {
+    const w = world(on, { compactFailures: 1000 })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(5 * 60 * SEC)
+
+    expect(w.compacts.length).toBe(3)
+    expect(w.fills).toEqual([CONTINUATION])
+    expect(w.logs.some(l => /couldn't compact/.test(l) && /prompt box/.test(l) && /\/compact/.test(l))).toBe(true)
+  })
+
+  test('gives up on compaction after its retries, keeps the prompt and fills nothing', { options: { fillDuringCompaction: false } }, async ($, on) => {
     const w = world(on, { compactFailures: 1000 })
     await start($)
     await relay($)
@@ -260,7 +288,7 @@ describe('relay', () => {
     expect(w.fills).toEqual([CONTINUATION])
   })
 
-  test('a skipped compaction fills nothing and says why', async ($, on) => {
+  test('a skipped compaction fills nothing and says why', { options: { fillDuringCompaction: false } }, async ($, on) => {
     const w = world(on, { compactSkip: 'blocked by a PreCompact hook' })
     await start($)
     await relay($)
@@ -409,7 +437,8 @@ describe('relay', () => {
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(0)
-    expect(w.calls).toEqual(['submit', 'fork', 'compact'])
+    // the box is filled as compaction starts
+    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
 
     await relay($, 'cancel')
     await relay($, 'second run')
@@ -574,7 +603,176 @@ describe('relay', () => {
     await saveTurn($, w)
     await w.clock.advance(SEC)
 
-    expect(w.writes).toEqual([{ path: NOTE, text: '# Handoff\nStep 2.\n' }])
+    expect(w.writes[0]).toEqual({ path: NOTE, text: '# Handoff\nStep 2.\n' })
     expect(w.forks[0]).not.toContain('Nothing was stale')
+  })
+})
+
+describe('the continuation prompt arrives while compaction runs', () => {
+  test('the box is filled before compaction finishes, and the toast follows it', async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
+    expect(w.fills).toEqual([CONTINUATION])
+    expect(w.toasts.length).toBe(0)
+    expect((await relay($, 'status')).text).toMatch(/continuing/i)
+
+    gate.resolve()
+    await w.clock.advance(SEC)
+    expect(w.fills.length).toBe(1)
+    expect(w.toasts.some(t => /review the prompt/.test(t))).toBe(true)
+    expect((await relay($, 'status')).text).toMatch(/idle/i)
+  })
+
+  test('a prompt the person already sent gets a plain toast after compaction', async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    w.box.text = '' // Enter queued it
+    gate.resolve()
+    await w.clock.advance(SEC)
+    expect(w.toasts.some(t => /review the prompt/.test(t))).toBe(false)
+    expect(w.toasts.some(t => /compacted/.test(t))).toBe(true)
+  })
+
+  test('a skipped compaction says the prompt in the box should wait for /compact', async ($, on) => {
+    const w = world(on, { compactSkip: 'blocked by a PreCompact hook' })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(5 * SEC)
+
+    expect(w.fills).toEqual([CONTINUATION])
+    expect(w.logs.some(l => l.includes('blocked by a PreCompact hook') && /prompt box/.test(l))).toBe(true)
+  })
+
+  test('with fillDuringCompaction off, the box is filled only after compaction', { options: { fillDuringCompaction: false } }, async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    expect(w.fills.length).toBe(0)
+
+    gate.resolve()
+    await w.clock.advance(SEC)
+    expect(w.fills).toEqual([CONTINUATION])
+  })
+
+  test('the generated prompt is kept beside the note, to compare with what was sent', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+
+    expect(w.writes).toEqual([
+      { path: NOTE, text: `${SAVE_ANSWER}\n` },
+      { path: NOTE.replace(/\.md$/, '.prompt.md'), text: `${CONTINUATION}\n` },
+    ])
+  })
+})
+
+describe('background notifications wait for the continuation prompt', () => {
+  test('a notification after the save turn is held, then rides along with the person’s prompt', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+
+    const held = await arrive($, '<task-notification>shell b1 finished</task-notification>', 'task-notification')
+    expect(held.drop).toMatch(/relay/i)
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
+
+    const sent = await arrive($, CONTINUATION, 'composer')
+    expect(sent.drop).toBeUndefined()
+    const last = w.submits.at(-1)
+    expect(last?.origin).toBe('composer')
+    expect(last?.context?.some(c => c.includes('shell b1 finished'))).toBe(true)
+
+    // the hold ends with that prompt
+    const later = await arrive($, '<task-notification>agent a2 finished</task-notification>', 'task-notification')
+    expect(later.drop).toBeUndefined()
+  })
+
+  test('a notification delivered into a running turn passes through', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+
+    const r = await arrive($, '<task-notification>x</task-notification>', 'task-notification', 'turn-9')
+    expect(r.drop).toBeUndefined()
+  })
+
+  test('no run, no hold', async ($, on) => {
+    world(on)
+    await start($)
+    const r = await arrive($, '<task-notification>x</task-notification>', 'task-notification')
+    expect(r.drop).toBeUndefined()
+  })
+
+  test('a message from another session is held too', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+
+    const r = await arrive($, 'Another Claude session sent a message: done', 'peer')
+    expect(r.drop).toMatch(/relay/i)
+  })
+
+  test('cancel releases what was held', async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { forkGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(0)
+    await arrive($, '<task-notification>shell b1 finished</task-notification>', 'task-notification')
+
+    await relay($, 'cancel')
+    await w.clock.advance(SEC)
+    expect(w.submits.some(s => s.origin === 'plugin' && s.text.includes('shell b1 finished'))).toBe(true)
+    gate.resolve()
+  })
+
+  test('submit mode: the held notifications ride along with the continuation prompt', { options: { deliver: 'submit' } }, async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, '<task-notification>shell b1 finished</task-notification>', 'task-notification')
+
+    gate.resolve()
+    await w.clock.advance(SEC)
+    // a plugin's submit can't carry context, so the notifications go in its text
+    const cont = w.submits.at(-1)
+    expect(cont?.text).toContain(CONTINUATION)
+    expect(cont?.text).toContain('shell b1 finished')
+    expect((await arrive($, '<task-notification>later</task-notification>', 'task-notification')).drop).toBeUndefined()
   })
 })

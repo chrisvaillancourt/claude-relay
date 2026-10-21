@@ -6,13 +6,17 @@ import {
   continuationPrompt,
   extractNote,
   forSubmit,
+  heldNotice,
   isCanceled,
+  isHeldOrigin,
+  isPersonOrigin,
   notePathFor,
   parseArgs,
+  promptPathFor,
   SAVE_MARKER,
   savePrompt,
 } from './prompts'
-import type { Config, Run, SavedPrompt } from '../types'
+import type { Config, Hold, Run, SavedPrompt } from '../types'
 
 /** A compaction right after the save turn may still see it running; retry briefly, then give up. */
 const COMPACT_RETRY_MS = 2000
@@ -26,10 +30,15 @@ const IDLE: Run = { phase: 'idle', runId: 0, saveTurnId: null, startedAt: null, 
 
 const runAtom = atom({ plugin: 'relay', key: 'run' } as const, IDLE)
 
+const RELEASED: Hold = { isHolding: false, items: [] }
+const holdAtom = atom({ plugin: 'relay', key: 'hold' } as const, RELEASED)
+
 // Module variables reset on a hot reload; `$.state` survives one. A run left
 // `continuing` by a reload has lost its timer, so session.start resets it.
 let config: Config = configFrom({})
 let timer: Timer | null = null
+/** The run whose continuation prompt went into the box as compaction started. */
+let filledEarlyRunId: number | null = null
 let isInteractive = true
 /** Whether a main-loop turn is running; subagents raise no turn.start. */
 let isTurnRunning = false
@@ -42,7 +51,18 @@ function configFrom(options: PluginOptions): Config {
     copyToClipboard: options.copyToClipboard !== false,
     noteDir: typeof options.noteDir === 'string' ? options.noteDir.trim() : '',
     saveInstructions: typeof options.saveInstructions === 'string' ? options.saveInstructions.trim() : '',
+    fillDuringCompaction: options.fillDuringCompaction !== false,
   }
+}
+
+/** Ends the hold and returns what it held. */
+async function release($: EngineInterface): Promise<string[]> {
+  let items: string[] = []
+  await update($, holdAtom, cur => {
+    items = cur.items
+    return RELEASED
+  })
+  return items
 }
 
 function cancelTimer() {
@@ -100,12 +120,22 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
   }
   let result
   try {
-    result = await $.session.compact({ instructions: config.compactInstructions })
+    const compacting = $.session.compact({ instructions: config.compactInstructions })
+    if (attempt === 1 && config.deliver === 'fill' && config.fillDuringCompaction) {
+      // The prompt goes in as compaction starts, so the person can queue it
+      // before a background task finishes. Its rejection is awaited below.
+      compacting.catch(() => undefined)
+      if (await fillSaved($, runId)) {
+        filledEarlyRunId = runId
+        $.ui.status('compacting… the continuation prompt is in the box; Enter queues it')
+      }
+    }
+    result = await compacting
   } catch (err) {
     $.ui.log(`relay: compaction attempt ${attempt} rejected: ${errorText(err)}`, { to: 'debug' })
     // The person pressing Esc or Ctrl+C cancels compaction; that's a decision, not a hiccup.
     if (isCanceled(errorText(err))) {
-      await finish($, runId, 'compaction was canceled. The continuation prompt is saved: /relay paste.')
+      await finish($, runId, `compaction was canceled. ${savedHint(runId, '/relay paste')}`)
       return
     }
     if (isInteractive && attempt < COMPACT_ATTEMPTS && (await isCurrent($, runId))) {
@@ -114,18 +144,28 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
       })
       return
     }
-    await finish(
-      $,
-      runId,
-      `couldn't compact (${errorText(err)}). The continuation prompt is saved: run /compact yourself, then /relay paste.`,
-    )
+    await finish($, runId, `couldn't compact (${errorText(err)}). ${savedHint(runId, 'run /compact yourself, then /relay paste')}`)
     return
   }
   if (result.skip !== undefined) {
-    await finish($, runId, `compaction was skipped (${result.skip}). The continuation prompt is saved: /relay paste.`)
+    await finish($, runId, `compaction was skipped (${result.skip}). ${savedHint(runId, '/relay paste')}`)
     return
   }
   await deliver($, runId)
+}
+
+/** Where the continuation prompt is after a failed compaction, and what to do with it. */
+function savedHint(runId: number, recovery: string): string {
+  return filledEarlyRunId === runId
+    ? "The continuation prompt is already in the prompt box: run /compact before you send it, or it runs on the uncompacted conversation."
+    : `The continuation prompt is saved: ${recovery}.`
+}
+
+/** Fills the box with the run's saved prompt; false when it can't. */
+async function fillSaved($: EngineInterface, runId: number): Promise<boolean> {
+  if (!(await isCurrent($, runId))) return false
+  const saved = (await $.store.get('lastPrompt')) as SavedPrompt | undefined
+  return saved?.text ? fill($, saved.text).catch(() => false) : false
 }
 
 async function deliver($: EngineInterface, runId: number) {
@@ -134,13 +174,23 @@ async function deliver($: EngineInterface, runId: number) {
   const text = saved?.text ?? ''
   if (config.deliver === 'submit') {
     await finish($, runId, null)
+    // A plugin's submit carries no context, so what was held goes in its text.
+    const held = await release($)
+    const body = held.length ? `${forSubmit(text)}\n\n${heldNotice(held)}` : forSubmit(text)
     void $.prompt
-      .submit({ text: forSubmit(text), asUser: true })
+      .submit({ text: body, asUser: true })
       .then(r => {
         if (r.drop !== undefined) $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
       })
       .catch(err => $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`))
     toast($, 'compacted; sending the continuation prompt')
+    return
+  }
+  if (filledEarlyRunId === runId) {
+    await finish($, runId, null)
+    // Enter during compaction queues the prompt and empties the box.
+    const box = (await $.prompt.read().catch(() => ({ text: '' }))).text
+    toast($, box.includes(text) ? 'compacted; review the prompt and press Enter' : 'compacted')
     return
   }
   const isFilled = await fill($, text).catch(() => false)
@@ -178,6 +228,8 @@ async function continueRun($: EngineInterface, runId: number, answer: string, no
     }
     const saved: SavedPrompt = { text, at: await $.clock.now(), sessionId: await $.session.id() }
     await $.store.set('lastPrompt', saved)
+    // Kept beside the note, to compare with what the person sends; best effort.
+    await $.fs.write(promptPathFor(notePath), `${text}\n`).catch(() => undefined)
     if (config.copyToClipboard) await $.ui.copy({ text }).catch(() => undefined)
     if (!(await isCurrent($, runId))) return
     $.ui.status('compacting…')
@@ -257,11 +309,26 @@ export const register: Register = (on, options) => {
     )
     if (now.runId !== run.runId || now.phase !== 'continuing' || now.notePath === null) return result
     const notePath = now.notePath
+    // From here until the person's next prompt, background deliveries wait.
+    await update($, holdAtom, cur => ({ ...cur, isHolding: true }))
     // Compaction rejects while a turn runs, so continue once this one has ended.
     cancelTimer()
     timer = $.clock.after(0, () => void continueRun($, run.runId, e.answer, notePath))
     return result
   })
+
+  on('prompt.submit', async ($, e, next) => {
+    const hold = await read($, holdAtom)
+    if (!hold.isHolding) return next(e)
+    // One delivered into a running turn starts no turn of its own.
+    if (isHeldOrigin(e.origin.kind) && e.turnId === undefined) {
+      await update($, holdAtom, cur => ({ ...cur, items: [...cur.items, e.text] }))
+      return { drop: 'relay is holding this until you send the continuation prompt; it goes along with that prompt.' }
+    }
+    if (!isPersonOrigin(e.origin.kind)) return next(e)
+    const held = await release($)
+    return held.length ? next({ ...e, context: [...(e.context ?? []), heldNotice(held)] }) : next(e)
+  }).catch(($, e, next) => next(e)) // a failure lets the prompt through; holding is best effort
 
   on('command.run', { command: 'relay' }, async ($, e) => {
     const cmd = parseArgs(e.args)
@@ -279,6 +346,13 @@ export const register: Register = (on, options) => {
         cancelTimer()
         await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
         $.ui.status(undefined)
+        const held = await release($)
+        // command.run can't submit (it would wait on this hook), so from a timer.
+        if (held.length) {
+          $.clock.after(0, () => {
+            $.prompt.submit({ text: heldNotice(held) }).catch(() => undefined)
+          })
+        }
         return { text: 'Cancelled. Anything already saved or compacted stays.' }
       }
 
@@ -305,7 +379,10 @@ export const register: Register = (on, options) => {
         $.ui.status('saving state…')
         // The host refuses a submit from inside command.run (it would wait on
         // the turn this hook holds), so submit once the command has returned.
-        const text = savePrompt(cmd.focus, notePath, config.saveInstructions)
+        // Anything still held from an earlier run goes to this save turn.
+        const held = await release($)
+        const save = savePrompt(cmd.focus, notePath, config.saveInstructions)
+        const text = held.length ? `${save}\n\n${heldNotice(held)}` : save
         cancelTimer()
         timer = $.clock.after(0, () => {
           submitSave($, runId, text).catch(err =>
