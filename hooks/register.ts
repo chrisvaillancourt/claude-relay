@@ -146,7 +146,9 @@ async function reportLostRun($: EngineInterface) {
     if (record.phase === 'saving') lostSaveTurn = record
     $.ui.log(restartNotice(record))
     // After the save turn, compaction may have run before the old process died.
-    toast($, record.phase === 'saving' ? 'a restart interrupted /relay; nothing was compacted' : 'a restart interrupted /relay; see the log')
+    const text = record.phase === 'saving' ? 'a restart interrupted /relay; nothing was compacted' : 'a restart interrupted /relay; see the log'
+    toast($, text)
+    notify($, text)
   } catch {
     // Reporting must never throw out of a hook.
   }
@@ -190,6 +192,21 @@ function errorText(err: unknown) {
 function toast($: EngineInterface, text: string) {
   try {
     $.ui.toast(text)
+  } catch {
+    // Best effort.
+  }
+}
+
+/**
+ * Raises a desktop notification without waiting for it. A detached `--bg`
+ * session answers `no-channel`, but the person's `Notification` hooks still
+ * hear it, which is how someone away from that session learns of it.
+ */
+function notify($: EngineInterface, text: string) {
+  try {
+    void $.ui.notify(text).catch(() => {
+      // Best effort.
+    })
   } catch {
     // Best effort.
   }

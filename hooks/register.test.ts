@@ -42,6 +42,8 @@ type WorldOpts = {
   tmpdir?: string | null
   writeFails?: boolean
   answer?: string
+  /** Holds every notify open until the test resolves it (a slow notification channel). */
+  notifyGate?: Promise<void>
 }
 
 /** The engine beneath the plugin, recording what the plugin asked of it, in order. */
@@ -143,8 +145,15 @@ const world = (on: On, opts: WorldOpts = {}) => {
     return { value: undefined }
   })
   on('ui.status', () => ({ value: undefined }))
+  const notifies: { text: string; title?: string }[] = []
+  on('ui.notify', async ($, e) => {
+    notifies.push({ text: e.text, title: e.title })
+    if (opts.notifyGate) await opts.notifyGate
+    // what a detached background session answers; its Notification hooks still hear it
+    return { value: { isSent: false as const, reason: 'no-channel' as const } }
+  })
 
-  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, writes, box, store, answer: opts.answer ?? SAVE_ANSWER }
+  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, notifies, writes, box, store, answer: opts.answer ?? SAVE_ANSWER }
 }
 
 /** A prompt the engine queued from somewhere other than the plugin: a background task, or the person's Enter. */
@@ -1090,7 +1099,46 @@ describe('a restart that loses the run is reported', () => {
     await $.turn.start({ text: w.submits[0]?.text ?? '', turnId: 'save-1' })
     await start($)
     expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
+    expect(w.notifies).toEqual([])
     expect(w.store.get(KEY)).toBeDefined()
+  })
+
+  test('a restart notifies once, in the toast’s words, under the default title', async ($, on) => {
+    const w = world(on, { store: { [KEY]: { phase: 'saving', notePath: NOTE, startedAt: T0 } } })
+    await start($)
+    await w.clock.advance(0)
+    expect(w.notifies).toEqual([{ text: 'a restart interrupted /relay; nothing was compacted', title: 'relay' }])
+    await start($)
+    await w.clock.advance(0)
+    expect(w.notifies.length).toBe(1)
+  })
+
+  test('a restart after the save turn notifies without claiming nothing was compacted', async ($, on) => {
+    const w = world(on, { store: { [KEY]: { phase: 'continuing', notePath: NOTE, startedAt: T0 } } })
+    await start($)
+    await w.clock.advance(0)
+    expect(w.notifies).toEqual([{ text: 'a restart interrupted /relay; see the log', title: 'relay' }])
+  })
+
+  test('no record, no notification', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await w.clock.advance(0)
+    expect(w.notifies).toEqual([])
+  })
+
+  test('a notification channel that never answers does not hold up the start', async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { store: { [KEY]: { phase: 'saving', notePath: NOTE, startedAt: T0 } }, notifyGate: gate.p })
+    let isStarted = false
+    void start($).then(() => {
+      isStarted = true
+    })
+    await new Promise<void>(r => setTimeout(r, 50))
+    expect(isStarted).toBe(true)
+    expect(w.logs.some(l => /restart/i.test(l))).toBe(true)
+    expect(w.notifies.length).toBe(1)
+    gate.resolve()
   })
 
   test('a restart during the save turn reports it, then saves the resumed turn’s note without compacting', async ($, on) => {
@@ -1145,6 +1193,7 @@ describe('a restart that loses the run is reported', () => {
       },
     })
     await start($)
+    expect(w.notifies).toEqual([])
     expect(w.store.get('run/old')).toBeUndefined()
     expect(w.store.get('run/recent')).toBeDefined()
     expect(w.store.get('lastPrompt')).toBeDefined()
