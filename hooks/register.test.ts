@@ -1149,3 +1149,41 @@ describe('a restart that loses the run is reported', () => {
     expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
   })
 })
+
+describe('subagent turns are not the main loop', () => {
+  test('a subagent turn that starts after the save turn does not stop the run', async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { forkGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(0)
+    // a background agent the save turn started keeps working while relay forks
+    await $.turn.start({ text: '', turnId: 'agent-turn', agentId: 'agent-1' })
+    gate.resolve()
+    await w.clock.advance(SEC)
+
+    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
+    expect(w.logs.some(l => /stopped/.test(l))).toBe(false)
+  })
+
+  test('a subagent turn does not end the hold the person’s prompt started', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    await arrive($, '<task-notification>shell b1 finished</task-notification>', 'task-notification')
+    await arrive($, 'go on', 'composer')
+    await arrive($, '<task-notification>shell b2 finished</task-notification>', 'task-notification')
+    await $.turn.start({ text: '', turnId: 'agent-turn', agentId: 'agent-1' })
+    await w.clock.advance(SEC)
+    // b2 follows the person's turn, not a subagent's
+    expect(w.submits.some(s => s.text.includes('shell b2 finished') && s.origin === 'plugin')).toBe(false)
+    await $.turn.start({ text: 'go on', turnId: 'person' })
+    await w.clock.advance(SEC)
+    expect(w.submits.some(s => s.text.includes('shell b2 finished') && s.origin === 'plugin')).toBe(true)
+  })
+})

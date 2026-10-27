@@ -52,7 +52,7 @@ let filledEarlyRunId: number | null = null
 /** The run a main-loop turn started in after its save turn, even one that has ended since. */
 let interruptedRunId: number | null = null
 let isInteractive = true
-/** Whether a main-loop turn is running; subagents raise no turn.start. */
+/** Whether a main-loop turn is running. */
 let isTurnRunning = false
 /** A save turn whose run a restart lost: the first main-loop turn to end may be its resumption. */
 let lostSaveTurn: RunRecord | null = null
@@ -421,6 +421,8 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // Subagents' and teammates' turns raise turn.start too (2.1.312; not 2.1.294); only the main loop's count.
+    if (e.agentId !== undefined) return next(e)
     isTurnRunning = true
     // The person's prompt took what was held at Enter; anything since follows its turn.
     if ((await read($, holdAtom)).endsAtTurn) await releaseToSession($)
