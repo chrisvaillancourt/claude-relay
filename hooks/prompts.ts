@@ -92,10 +92,12 @@ export function taggedNote(answer: string): string | null {
 
 /**
  * The note with a `Session: <id>` line, so the next session can find this
- * one's transcript; a note that already names its session is left alone.
+ * one's transcript. A note that already names this session is left alone;
+ * a `Session:` line copied from an earlier note doesn't count.
  */
 export function withSession(note: string, sessionId: string): string {
-  return /^Session: /m.test(note) ? note : `${note}\n\nSession: ${sessionId}`
+  const named = note.split(/\r?\n/).some(line => line.startsWith('Session: ') && line.includes(sessionId))
+  return named ? note : `${note}\n\nSession: ${sessionId}`
 }
 
 export const RUN_KEY_PREFIX = 'run/'

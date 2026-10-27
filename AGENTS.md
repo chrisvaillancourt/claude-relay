@@ -4,7 +4,7 @@ A Claude Code mod (function-hook plugin): `/relay` runs a save turn, forks a con
 
 ## Layout
 
-- `hooks/prompts.ts`: pure text and parsing (`notePathFor`, `promptPathFor`, `savePrompt`, `extractNote`, `taggedNote`, `runKey`, `isRunRecord`, `restartNotice`, `resumedNoteNotice`, `continuationPrompt`, `cleanContinuation`, `forSubmit`, `isHeldOrigin`, `isPersonOrigin`, `heldNotice`, `isCanceled`, `parseArgs`). No `$`. Unit-tested in `prompts.test.ts`.
+- `hooks/prompts.ts`: pure text and parsing (`notePathFor`, `promptPathFor`, `savePrompt`, `extractNote`, `taggedNote`, `withSession`, `runKey`, `isRunRecord`, `restartNotice`, `resumedNoteNotice`, `continuationPrompt`, `cleanContinuation`, `forSubmit`, `isHeldOrigin`, `isPersonOrigin`, `heldNotice`, `isCanceled`, `parseArgs`). No `$`. Unit-tested in `prompts.test.ts`.
 - `hooks/register.ts`: wiring. Hooks (`session.start`, `turn.start`, `turn.complete`, `prompt.submit`, `command.run`), the run's state machine, the hold, timers, logging.
 - `types/index.d.ts`: types and the `$.state` contract (`PluginState['relay']`: `run` and `hold`). Every `$.state` key the module uses must be declared here.
 - `.claude-plugin/plugin.json`: manifest and `userConfig`. `marketplace.json` makes the repo its own marketplace.

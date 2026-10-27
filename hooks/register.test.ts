@@ -1191,14 +1191,24 @@ describe('subagent turns are not the main loop', () => {
 })
 
 describe('what relay leaves for the next session', () => {
-  test('a note that already names its session is saved as it is', async ($, on) => {
-    const w = world(on, { answer: `${SAVE_ANSWER}\n\nSession: abc (searchable)` })
+  test('a note that already names this session is saved as it is', async ($, on) => {
+    const w = world(on, { answer: `${SAVE_ANSWER}\n\nSession: sid-1 (searchable)` })
     await start($)
     await relay($)
     await w.clock.advance(0)
     await saveTurn($, w)
     await w.clock.advance(SEC)
-    expect(w.writes[0]?.text).toBe(`${SAVE_ANSWER}\n\nSession: abc (searchable)\n`)
+    expect(w.writes[0]?.text).toBe(`${SAVE_ANSWER}\n\nSession: sid-1 (searchable)\n`)
+  })
+
+  test('a Session line carried over from an earlier note still gets this session added', async ($, on) => {
+    const w = world(on, { answer: `${SAVE_ANSWER}\n\nSession: old-session` })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    expect(w.writes[0]?.text).toBe(`${SAVE_ANSWER}\n\nSession: old-session\n\nSession: sid-1\n`)
   })
 
   test('another session saving its prompt meanwhile does not change which prompt is filled', { options: { fillDuringCompaction: false } }, async ($, on) => {
