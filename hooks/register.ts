@@ -144,8 +144,9 @@ async function reportLostRun($: EngineInterface) {
     await forgetRun($)
     if (!isRunRecord(record)) return
     if (record.phase === 'saving') lostSaveTurn = record
-    $.ui.log(`${restartNotice(record)}`)
-    toast($, 'a restart interrupted /relay; nothing was compacted')
+    $.ui.log(restartNotice(record))
+    // After the save turn, compaction may have run before the old process died.
+    toast($, record.phase === 'saving' ? 'a restart interrupted /relay; nothing was compacted' : 'a restart interrupted /relay; see the log')
   } catch {
     // Reporting must never throw out of a hook.
   }

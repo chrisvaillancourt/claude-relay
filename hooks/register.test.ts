@@ -1226,3 +1226,12 @@ describe('what relay leaves for the next session', () => {
     expect(w.logs.filter(l => l.startsWith('relay:'))).toEqual([])
   })
 })
+
+describe('the restart toast', () => {
+  test('after the save turn it does not claim nothing was compacted', async ($, on) => {
+    const w = world(on, { store: { 'run/sid-1': { phase: 'continuing', notePath: NOTE, startedAt: T0 } } })
+    await start($)
+    expect(w.toasts.length).toBe(1)
+    expect(w.toasts.some(t => /nothing was compacted/.test(t))).toBe(false)
+  })
+})
