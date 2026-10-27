@@ -23,6 +23,7 @@ import {
   SAVE_MARKER,
   savePrompt,
   taggedNote,
+  withSession,
 } from './prompts'
 import type { Config, Hold, Run, RunRecord, SavedPrompt } from '../types'
 
@@ -56,6 +57,11 @@ let isInteractive = true
 let isTurnRunning = false
 /** A save turn whose run a restart lost: the first main-loop turn to end may be its resumption. */
 let lostSaveTurn: RunRecord | null = null
+/**
+ * This run's continuation prompt. `lastPrompt` in `$.store` is shared by every
+ * session, so another session's /relay could overwrite it before this one fills.
+ */
+let runPrompt: { runId: number; text: string } | null = null
 
 function configFrom(options: PluginOptions): Config {
   const instructions = typeof options.compactInstructions === 'string' ? options.compactInstructions.trim() : ''
@@ -83,7 +89,7 @@ async function release($: EngineInterface): Promise<string[]> {
 function logHeld($: EngineInterface, items: readonly string[], why: string) {
   if (!items.length) return
   try {
-    $.ui.log(`relay: couldn't hand back ${items.length} held message${items.length === 1 ? '' : 's'} (${why}). Here they are:\n\n${heldNotice(items)}`)
+    $.ui.log(`couldn't hand back ${items.length} held message${items.length === 1 ? '' : 's'} (${why}). Here they are:\n\n${heldNotice(items)}`)
   } catch {
     // Best effort.
   }
@@ -138,7 +144,7 @@ async function reportLostRun($: EngineInterface) {
     await forgetRun($)
     if (!isRunRecord(record)) return
     if (record.phase === 'saving') lostSaveTurn = record
-    $.ui.log(`relay: ${restartNotice(record)}`)
+    $.ui.log(`${restartNotice(record)}`)
     toast($, 'a restart interrupted /relay; nothing was compacted')
   } catch {
     // Reporting must never throw out of a hook.
@@ -164,10 +170,10 @@ async function saveLostNote($: EngineInterface, record: RunRecord, answer: strin
   const note = taggedNote(answer)
   if (!note) return
   try {
-    await $.fs.write(record.notePath, `${note}\n`)
-    $.ui.log(`relay: ${resumedNoteNotice(record.notePath)}`)
+    await $.fs.write(record.notePath, `${withSession(note, await $.session.id())}\n`)
+    $.ui.log(resumedNoteNotice(record.notePath))
   } catch (err) {
-    $.ui.log(`relay: couldn't save the resumed turn's handoff note to ${record.notePath} (${errorText(err)}); it's in the turn above. Nothing was compacted.`)
+    $.ui.log(`couldn't save the resumed turn's handoff note to ${record.notePath} (${errorText(err)}); it's in the turn above. Nothing was compacted.`)
   }
 }
 
@@ -196,7 +202,7 @@ async function finish($: EngineInterface, runId: number, message: string | null,
     await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId } : cur))
     await forgetRun($)
     $.ui.status(undefined)
-    if (message) $.ui.log(`relay: ${message}`)
+    if (message) $.ui.log(`${message}`)
     // A failure leaves no continuation prompt to wait for, unless it's already in the box.
     if (message && !keepHold && filledEarlyRunId !== runId) await releaseToSession($)
   } catch {
@@ -243,7 +249,7 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
     }
     result = await compacting
   } catch (err) {
-    $.ui.log(`relay: compaction attempt ${attempt} rejected: ${errorText(err)}`, { to: 'debug' })
+    $.ui.log(`compaction attempt ${attempt} rejected: ${errorText(err)}`, { to: 'debug' })
     // The person pressing Esc or Ctrl+C cancels compaction; that's a decision, not a hiccup.
     if (isCanceled(errorText(err))) {
       await finish($, runId, `compaction was canceled. ${savedHint(runId, '/relay paste')}`)
@@ -276,14 +282,17 @@ function savedHint(runId: number, recovery: string): string {
 /** Fills the box with the run's saved prompt; false when it can't. */
 async function fillSaved($: EngineInterface, runId: number): Promise<boolean> {
   if (!(await isCurrent($, runId))) return false
-  const saved = (await $.store.get('lastPrompt')) as SavedPrompt | undefined
-  return saved?.text ? fill($, saved.text).catch(() => false) : false
+  const text = promptFor(runId)
+  return text ? fill($, text).catch(() => false) : false
+}
+
+function promptFor(runId: number): string {
+  return runPrompt?.runId === runId ? runPrompt.text : ''
 }
 
 async function deliver($: EngineInterface, runId: number) {
   if (!(await isCurrent($, runId))) return
-  const saved = (await $.store.get('lastPrompt')) as SavedPrompt | undefined
-  const text = saved?.text ?? ''
+  const text = promptFor(runId)
   if (config.deliver === 'submit') {
     await finish($, runId, null)
     // A plugin's submit carries no context, so what was held goes in its text.
@@ -293,11 +302,11 @@ async function deliver($: EngineInterface, runId: number) {
       .submit({ text: body, asUser: true })
       .then(async r => {
         if (r.drop === undefined) return
-        $.ui.log(`relay: the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
+        $.ui.log(`the continuation prompt was dropped (${r.drop}); /relay paste to retry.`)
         logHeld($, held, r.drop)
       })
       .catch(err => {
-        $.ui.log(`relay: couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`)
+        $.ui.log(`couldn't submit the continuation prompt (${errorText(err)}); /relay paste to retry.`)
         logHeld($, held, errorText(err))
       })
     toast($, 'compacted; sending the continuation prompt')
@@ -318,13 +327,14 @@ async function deliver($: EngineInterface, runId: number) {
 
 /** After the save turn: write its note, fork the continuation prompt, keep it, then compact and deliver. */
 async function continueRun($: EngineInterface, runId: number, answer: string, notePath: string) {
-  const note = extractNote(answer)
+  const tagged = extractNote(answer)
   try {
     if (!(await isCurrent($, runId))) return
-    if (!note) {
+    if (!tagged) {
       await finish($, runId, 'stopped: the save turn ended with no handoff note. Nothing was compacted.')
       return
     }
+    const note = withSession(tagged, await $.session.id())
     try {
       await $.fs.write(notePath, `${note}\n`)
     } catch (err) {
@@ -346,6 +356,7 @@ async function continueRun($: EngineInterface, runId: number, answer: string, no
       await finish($, runId, 'stopped: the continuation prompt came back empty. Nothing was compacted.')
       return
     }
+    runPrompt = { runId, text }
     const saved: SavedPrompt = { text, at: await $.clock.now(), sessionId: await $.session.id() }
     await $.store.set('lastPrompt', saved)
     // Kept beside the note, to compare with what the person sends; best effort.
@@ -411,7 +422,7 @@ export const register: Register = (on, options) => {
       await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
       await forgetRun($)
       $.ui.log(
-        'relay: a reload interrupted the run after the save turn. If a continuation prompt was drafted, /relay paste has it; run /compact yourself first.',
+        'a reload interrupted the run after the save turn. If a continuation prompt was drafted, /relay paste has it; run /compact yourself first.',
       )
     } else if (run.phase === 'idle') {
       await reportLostRun($)

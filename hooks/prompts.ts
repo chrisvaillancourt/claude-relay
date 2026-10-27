@@ -90,6 +90,14 @@ export function taggedNote(answer: string): string | null {
   return note === undefined ? null : note.trim()
 }
 
+/**
+ * The note with a `Session: <id>` line, so the next session can find this
+ * one's transcript; a note that already names its session is left alone.
+ */
+export function withSession(note: string, sessionId: string): string {
+  return /^Session: /m.test(note) ? note : `${note}\n\nSession: ${sessionId}`
+}
+
 export const RUN_KEY_PREFIX = 'run/'
 
 /** Where a run in progress is kept in `$.store`, one key per session, so a new process can tell it was lost. */

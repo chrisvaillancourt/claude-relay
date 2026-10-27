@@ -10,6 +10,8 @@ const T0 = Date.UTC(2026, 9, 7, 15, 0)
 const SEC = 1000
 const CONTINUATION = '@notes/hub.md\n@notes/log.md\nResume at step 3; the staging deploy is still running.'
 const SAVE_ANSWER = '# Handoff\n\nStep 2 of 3 done; notes/hub.md is current.'
+/** The note as relay saves it: the session id added, so the next session can find this one. */
+const NOTED = `${SAVE_ANSWER}\n\nSession: sid-1`
 /** Where the note lands for T0, a TMPDIR of /tmp/T/ and a project root of /work/my-proj. */
 const NOTE = '/tmp/T/claude-relay/my-proj-20261007T150000Z.md'
 
@@ -188,8 +190,8 @@ describe('relay', () => {
 
     expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
     expect(w.submits[0]?.text).toContain(NOTE)
-    expect(w.writes[0]).toEqual({ path: NOTE, text: `${SAVE_ANSWER}\n` })
-    expect(w.forks).toEqual([continuationPrompt(SAVE_ANSWER, NOTE)])
+    expect(w.writes[0]).toEqual({ path: NOTE, text: `${NOTED}\n` })
+    expect(w.forks).toEqual([continuationPrompt(NOTED, NOTE)])
     expect(w.forks[0]).toContain(`@${NOTE}`)
     expect(w.compacts).toEqual(["Keep any information that's helpful to the agent and not written to a durable location."])
     expect(w.fills).toEqual([CONTINUATION])
@@ -617,7 +619,7 @@ describe('relay', () => {
     await saveTurn($, w)
     await w.clock.advance(SEC)
 
-    expect(w.writes[0]).toEqual({ path: NOTE, text: '# Handoff\nStep 2.\n' })
+    expect(w.writes[0]).toEqual({ path: NOTE, text: '# Handoff\nStep 2.\n\nSession: sid-1\n' })
     expect(w.forks[0]).not.toContain('Nothing was stale')
   })
 })
@@ -696,7 +698,7 @@ describe('the continuation prompt arrives while compaction runs', () => {
     await w.clock.advance(SEC)
 
     expect(w.writes).toEqual([
-      { path: NOTE, text: `${SAVE_ANSWER}\n` },
+      { path: NOTE, text: `${NOTED}\n` },
       { path: NOTE.replace(/\.md$/, '.prompt.md'), text: `${CONTINUATION}\n` },
     ])
   })
@@ -1101,7 +1103,7 @@ describe('a restart that loses the run is reported', () => {
     await $.turn.complete({ answer: resumedAnswer, durationMs: 1, isAborted: false, turnId: 'resumed', reason: 'answer' })
     await w.clock.advance(SEC)
 
-    expect(w.writes).toEqual([{ path: NOTE, text: `${SAVE_ANSWER}\n` }])
+    expect(w.writes).toEqual([{ path: NOTE, text: `${NOTED}\n` }])
     expect(w.calls).toEqual([])
     const last = w.logs.at(-1) ?? ''
     expect(last).toContain(NOTE)
@@ -1185,5 +1187,42 @@ describe('subagent turns are not the main loop', () => {
     await $.turn.start({ text: 'go on', turnId: 'person' })
     await w.clock.advance(SEC)
     expect(w.submits.some(s => s.text.includes('shell b2 finished') && s.origin === 'plugin')).toBe(true)
+  })
+})
+
+describe('what relay leaves for the next session', () => {
+  test('a note that already names its session is saved as it is', async ($, on) => {
+    const w = world(on, { answer: `${SAVE_ANSWER}\n\nSession: abc (searchable)` })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    expect(w.writes[0]?.text).toBe(`${SAVE_ANSWER}\n\nSession: abc (searchable)\n`)
+  })
+
+  test('another session saving its prompt meanwhile does not change which prompt is filled', { options: { fillDuringCompaction: false } }, async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p })
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w)
+    await w.clock.advance(0)
+    w.store.set('lastPrompt', { text: 'the other session’s prompt', at: T0, sessionId: 'sid-2' })
+    gate.resolve()
+    await w.clock.advance(SEC)
+    expect(w.fills).toEqual([CONTINUATION])
+  })
+
+  test('log lines leave the plugin name to the engine', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await saveTurn($, w, 'aborted')
+    await w.clock.advance(SEC)
+    expect(w.logs.length).toBeGreaterThan(0)
+    expect(w.logs.filter(l => l.startsWith('relay:'))).toEqual([])
   })
 })
