@@ -47,6 +47,18 @@ export type Run = {
   notePath: string | null
 }
 
+/**
+ * A run in progress, kept in $.store under `run/<session id>` from /relay
+ * until the run ends. `$.state` and timers die with the process, so a new
+ * process that finds one reports the run as lost.
+ */
+export type RunRecord = {
+  /** continuing: the note has been written. */
+  phase: 'saving' | 'continuing'
+  notePath: string
+  startedAt: number
+}
+
 /** The last continuation prompt, kept in $.store across sessions for /relay paste. */
 export type SavedPrompt = {
   text: string

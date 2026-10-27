@@ -45,7 +45,18 @@ type WorldOpts = {
 /** The engine beneath the plugin, recording what the plugin asked of it, in order. */
 const world = (on: On, opts: WorldOpts = {}) => {
   const clock = mock.clock(on, { now: T0 })
-  mock.store(on, opts.store ?? {})
+  // The store as a map the test can read back (the kit's mock.store keeps its own).
+  const store = new Map<string, unknown>(Object.entries(opts.store ?? {}))
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
   mock.env(on, opts.tmpdir === null ? {} : { TMPDIR: opts.tmpdir ?? '/tmp/T/' })
   const writes: { path: string; text: string }[] = []
   on('fs.write', ($, e) => {
@@ -131,7 +142,7 @@ const world = (on: On, opts: WorldOpts = {}) => {
   })
   on('ui.status', () => ({ value: undefined }))
 
-  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, writes, box, answer: opts.answer ?? SAVE_ANSWER }
+  return { clock, calls, submits, forks, compacts, fills, copies, logs, toasts, writes, box, store, answer: opts.answer ?? SAVE_ANSWER }
 }
 
 /** A prompt the engine queued from somewhere other than the plugin: a background task, or the person's Enter. */
@@ -1037,5 +1048,104 @@ describe('background notifications wait for the continuation prompt', () => {
     expect(cont?.text).toContain(CONTINUATION)
     expect(cont?.text).toContain('shell b1 finished')
     expect((await arrive($, '<task-notification>later</task-notification>', 'task-notification')).drop).toBeUndefined()
+  })
+})
+
+describe('a restart that loses the run is reported', () => {
+  const KEY = 'run/sid-1'
+  const DAY = 24 * 60 * 60 * SEC
+  const resumedAnswer = `Saved.\n\n<handoff-note>\n${SAVE_ANSWER}\n</handoff-note>`
+
+  test('a run in progress is kept in the store until it finishes', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    expect(w.store.get(KEY)).toEqual({ phase: 'saving', notePath: NOTE, startedAt: T0 })
+
+    await saveTurn($, w)
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['submit', 'fork', 'compact', 'fill'])
+    expect(w.store.get(KEY)).toBeUndefined()
+  })
+
+  test('a finished or cancelled run says nothing at the next start', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await relay($, 'cancel')
+    expect(w.store.get(KEY)).toBeUndefined()
+    await start($)
+    expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
+  })
+
+  test('a reload during the save turn keeps the run and its record, and reports nothing', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await relay($)
+    await w.clock.advance(0)
+    await $.turn.start({ text: w.submits[0]?.text ?? '', turnId: 'save-1' })
+    await start($)
+    expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
+    expect(w.store.get(KEY)).toBeDefined()
+  })
+
+  test('a restart during the save turn reports it, then saves the resumed turn’s note without compacting', async ($, on) => {
+    const w = world(on, { store: { [KEY]: { phase: 'saving', notePath: NOTE, startedAt: T0 - 60 * SEC } } })
+    await start($)
+    expect(w.logs.some(l => /restart/i.test(l) && l.includes('Nothing was compacted'))).toBe(true)
+    expect(w.store.get(KEY)).toBeUndefined()
+
+    await $.turn.start({ text: 'Continue the interrupted response', turnId: 'resumed' })
+    await $.turn.complete({ answer: resumedAnswer, durationMs: 1, isAborted: false, turnId: 'resumed', reason: 'answer' })
+    await w.clock.advance(SEC)
+
+    expect(w.writes).toEqual([{ path: NOTE, text: `${SAVE_ANSWER}\n` }])
+    expect(w.calls).toEqual([])
+    const last = w.logs.at(-1) ?? ''
+    expect(last).toContain(NOTE)
+    expect(last).toContain('/compact')
+    expect(last).toContain(`@${NOTE}`)
+  })
+
+  test('a resumed turn with no handoff note saves nothing, and only the first turn counts', async ($, on) => {
+    const w = world(on, { store: { [KEY]: { phase: 'saving', notePath: NOTE, startedAt: T0 } } })
+    await start($)
+    const logged = w.logs.length
+    await $.turn.start({ text: 'x', turnId: 't1' })
+    await $.turn.complete({ answer: 'no note here', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    await $.turn.start({ text: 'y', turnId: 't2' })
+    await $.turn.complete({ answer: resumedAnswer, durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+    await w.clock.advance(SEC)
+    expect(w.writes).toEqual([])
+    expect(w.logs.length).toBe(logged)
+  })
+
+  test('a restart after the save turn points to the note already written', async ($, on) => {
+    const w = world(on, { store: { [KEY]: { phase: 'continuing', notePath: NOTE, startedAt: T0 } } })
+    await start($)
+    const msg = w.logs.find(l => /restart/i.test(l)) ?? ''
+    expect(msg).toContain(`@${NOTE}`)
+    expect(msg).toContain('/compact')
+    await $.turn.start({ text: 'x', turnId: 't1' })
+    await $.turn.complete({ answer: resumedAnswer, durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    await w.clock.advance(SEC)
+    expect(w.writes).toEqual([])
+  })
+
+  test('records other sessions left behind are pruned after a week', async ($, on) => {
+    const w = world(on, {
+      store: {
+        'run/old': { phase: 'saving', notePath: NOTE, startedAt: T0 - 8 * DAY },
+        'run/recent': { phase: 'saving', notePath: NOTE, startedAt: T0 - DAY },
+        lastPrompt: { text: 'p', at: T0 - 30 * DAY, sessionId: 'old' },
+      },
+    })
+    await start($)
+    expect(w.store.get('run/old')).toBeUndefined()
+    expect(w.store.get('run/recent')).toBeDefined()
+    expect(w.store.get('lastPrompt')).toBeDefined()
+    expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
   })
 })

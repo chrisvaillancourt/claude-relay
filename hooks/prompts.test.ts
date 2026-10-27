@@ -15,6 +15,9 @@ import {
   promptPathFor,
   SAVE_MARKER,
   savePrompt,
+  taggedNote,
+  isRunRecord,
+  restartNotice,
 } from './prompts'
 
 describe('parseArgs', () => {
@@ -213,5 +216,32 @@ describe('isHeldOrigin', () => {
     // a channel may be the person driving the session remotely, who couldn't end a hold from there
     for (const kind of ['composer', 'bridge', 'sdk', 'slack-ping', 'channel', 'plugin', 'auto-continuation', 'unclassified'])
       expect(isHeldOrigin(kind)).toBe(false)
+  })
+})
+
+describe('taggedNote', () => {
+  test('is the tagged note, or null without tags, where extractNote falls back to the whole message', async () => {
+    expect(taggedNote('done.\n\n<handoff-note>\n# Note\n</handoff-note>')).toBe('# Note')
+    expect(taggedNote('just a reply')).toBeNull()
+    expect(extractNote('just a reply')).toBe('just a reply')
+  })
+})
+
+describe('run records', () => {
+  test('only a well-formed record counts', async () => {
+    expect(isRunRecord({ phase: 'saving', notePath: '/n.md', startedAt: 1 })).toBe(true)
+    expect(isRunRecord({ phase: 'idle', notePath: '/n.md', startedAt: 1 })).toBe(false)
+    expect(isRunRecord({ phase: 'saving', notePath: '/n.md' })).toBe(false)
+    expect(isRunRecord(null)).toBe(false)
+  })
+
+  test('the restart notice names the run and what to do next', async () => {
+    const at = Date.UTC(2026, 9, 27, 20, 49)
+    const saving = restartNotice({ phase: 'saving', notePath: '/n.md', startedAt: at })
+    expect(saving).toContain('20:49Z')
+    expect(saving).toContain('Nothing was compacted')
+    const continuing = restartNotice({ phase: 'continuing', notePath: '/n.md', startedAt: at })
+    expect(continuing).toContain('/compact')
+    expect(continuing).toContain('@/n.md')
   })
 })

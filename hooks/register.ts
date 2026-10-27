@@ -12,19 +12,27 @@ import {
   isCanceled,
   isHeldOrigin,
   isPersonOrigin,
+  isRunRecord,
   notePathFor,
   parseArgs,
   promptPathFor,
+  restartNotice,
+  resumedNoteNotice,
+  RUN_KEY_PREFIX,
+  runKey,
   SAVE_MARKER,
   savePrompt,
+  taggedNote,
 } from './prompts'
-import type { Config, Hold, Run, SavedPrompt } from '../types'
+import type { Config, Hold, Run, RunRecord, SavedPrompt } from '../types'
 
 /** A compaction right after the save turn may still see it running; retry briefly, then give up. */
 const COMPACT_RETRY_MS = 2000
 const COMPACT_ATTEMPTS = 3
 /** How long after the save prompt's turn started to expect its turn.start to have been matched. */
 const SAVE_TURN_WATCHDOG_MS = 5000
+/** Run records older than this, from sessions never resumed, are dropped at session start. */
+const RUN_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const DEFAULT_COMPACT_INSTRUCTIONS =
   "Keep any information that's helpful to the agent and not written to a durable location."
 
@@ -46,6 +54,8 @@ let interruptedRunId: number | null = null
 let isInteractive = true
 /** Whether a main-loop turn is running; subagents raise no turn.start. */
 let isTurnRunning = false
+/** A save turn whose run a restart lost: the first main-loop turn to end may be its resumption. */
+let lostSaveTurn: RunRecord | null = null
 
 function configFrom(options: PluginOptions): Config {
   const instructions = typeof options.compactInstructions === 'string' ? options.compactInstructions.trim() : ''
@@ -99,6 +109,68 @@ async function releaseToSession($: EngineInterface): Promise<number> {
   return held.length
 }
 
+/** Keeps the run in progress in `$.store`, so a new process can tell it was lost; best effort. */
+async function recordRun($: EngineInterface, record: RunRecord) {
+  try {
+    await $.store.set(runKey(await $.session.id()), record)
+  } catch {
+    // Best effort.
+  }
+}
+
+async function forgetRun($: EngineInterface) {
+  try {
+    await $.store.delete(runKey(await $.session.id()))
+  } catch {
+    // Best effort.
+  }
+}
+
+/**
+ * In a process with no run in `$.state`, a run record means the process that
+ * started the run is gone (an upgrade, a background session moved to another
+ * host, a crash and resume), and its timers with it: say so instead of going quiet.
+ */
+async function reportLostRun($: EngineInterface) {
+  try {
+    const record = await $.store.get(runKey(await $.session.id()))
+    if (record === undefined) return
+    await forgetRun($)
+    if (!isRunRecord(record)) return
+    if (record.phase === 'saving') lostSaveTurn = record
+    $.ui.log(`relay: ${restartNotice(record)}`)
+    toast($, 'a restart interrupted /relay; nothing was compacted')
+  } catch {
+    // Reporting must never throw out of a hook.
+  }
+}
+
+/** Drops run records other sessions left behind and never came back to. */
+async function pruneRuns($: EngineInterface) {
+  try {
+    const cutoff = (await $.clock.now()) - RUN_RECORD_TTL_MS
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(RUN_KEY_PREFIX)) continue
+      const record = await $.store.get(key)
+      if (!isRunRecord(record) || record.startedAt < cutoff) await $.store.delete(key)
+    }
+  } catch {
+    // Best effort.
+  }
+}
+
+/** The resumed save turn of a lost run ended: keep its note, since nothing else will. */
+async function saveLostNote($: EngineInterface, record: RunRecord, answer: string) {
+  const note = taggedNote(answer)
+  if (!note) return
+  try {
+    await $.fs.write(record.notePath, `${note}\n`)
+    $.ui.log(`relay: ${resumedNoteNotice(record.notePath)}`)
+  } catch (err) {
+    $.ui.log(`relay: couldn't save the resumed turn's handoff note to ${record.notePath} (${errorText(err)}); it's in the turn above. Nothing was compacted.`)
+  }
+}
+
 function cancelTimer() {
   timer?.cancel()
   timer = null
@@ -122,6 +194,7 @@ async function finish($: EngineInterface, runId: number, message: string | null,
     const run = await read($, runAtom)
     if (run.runId !== runId || run.phase === 'idle') return
     await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId } : cur))
+    await forgetRun($)
     $.ui.status(undefined)
     if (message) $.ui.log(`relay: ${message}`)
     // A failure leaves no continuation prompt to wait for, unless it's already in the box.
@@ -258,6 +331,8 @@ async function continueRun($: EngineInterface, runId: number, answer: string, no
       await finish($, runId, `stopped: couldn't write the handoff note to ${notePath} (${errorText(err)}). Nothing was compacted.`)
       return
     }
+    const startedAt = (await read($, runAtom)).startedAt
+    if (startedAt !== null) await recordRun($, { phase: 'continuing', notePath, startedAt })
     $.ui.status('writing the continuation prompt…')
     // The fork replays the last request, which ends before the note, so the note rides along.
     const reply = await $.model.fork({ prompt: continuationPrompt(note, notePath) })
@@ -334,10 +409,14 @@ export const register: Register = (on, options) => {
     const run = await read($, runAtom)
     if (run.phase === 'continuing') {
       await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
+      await forgetRun($)
       $.ui.log(
         'relay: a reload interrupted the run after the save turn. If a continuation prompt was drafted, /relay paste has it; run /compact yourself first.',
       )
+    } else if (run.phase === 'idle') {
+      await reportLostRun($)
     }
+    await pruneRuns($)
     return result
   })
 
@@ -362,6 +441,12 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return result
     isTurnRunning = false
     const run = await read($, runAtom)
+    if (lostSaveTurn) {
+      const lost = lostSaveTurn
+      lostSaveTurn = null
+      if (run.phase === 'idle' && e.reason === 'answer') await saveLostNote($, lost, e.answer)
+      return result
+    }
     if (run.phase !== 'saving' || run.saveTurnId !== e.turnId) return result
     if (e.reason !== 'answer') {
       await finish($, run.runId, `stopped: the save turn ended (${e.reason}). Nothing was compacted.`)
@@ -438,6 +523,7 @@ export const register: Register = (on, options) => {
         if (run.phase !== 'idle') {
           cancelTimer()
           await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
+          await forgetRun($)
           $.ui.status(undefined)
         }
         const released = await releaseToSession($)
@@ -465,6 +551,8 @@ export const register: Register = (on, options) => {
         const noteDir = config.noteDir || `${(await $.env.get('TMPDIR')) || '/tmp'}`.replace(/\/+$/, '') + '/claude-relay'
         const notePath = notePathFor(noteDir, await $.session.root(), startedAt)
         await update($, runAtom, () => ({ phase: 'saving' as const, runId, saveTurnId: null, startedAt, notePath }))
+        await recordRun($, { phase: 'saving', notePath, startedAt })
+        lostSaveTurn = null
         $.ui.status('saving state…')
         // The host refuses a submit from inside command.run (it would wait on
         // the turn this hook holds), so submit once the command has returned.

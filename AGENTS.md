@@ -4,7 +4,7 @@ A Claude Code mod (function-hook plugin): `/relay` runs a save turn, forks a con
 
 ## Layout
 
-- `hooks/prompts.ts`: pure text and parsing (`notePathFor`, `promptPathFor`, `savePrompt`, `extractNote`, `continuationPrompt`, `cleanContinuation`, `forSubmit`, `isHeldOrigin`, `isPersonOrigin`, `heldNotice`, `isCanceled`, `parseArgs`). No `$`. Unit-tested in `prompts.test.ts`.
+- `hooks/prompts.ts`: pure text and parsing (`notePathFor`, `promptPathFor`, `savePrompt`, `extractNote`, `taggedNote`, `runKey`, `isRunRecord`, `restartNotice`, `resumedNoteNotice`, `continuationPrompt`, `cleanContinuation`, `forSubmit`, `isHeldOrigin`, `isPersonOrigin`, `heldNotice`, `isCanceled`, `parseArgs`). No `$`. Unit-tested in `prompts.test.ts`.
 - `hooks/register.ts`: wiring. Hooks (`session.start`, `turn.start`, `turn.complete`, `prompt.submit`, `command.run`), the run's state machine, the hold, timers, logging.
 - `types/index.d.ts`: types and the `$.state` contract (`PluginState['relay']`: `run` and `hold`). Every `$.state` key the module uses must be declared here.
 - `.claude-plugin/plugin.json`: manifest and `userConfig`. `marketplace.json` makes the repo its own marketplace.
@@ -38,6 +38,7 @@ Both must pass before every commit. A behavior change needs a test in `hooks/*.t
 - **`saving` can't hang.** Five seconds after the save prompt's turn starts, a run whose save turn wasn't matched stops.
 - **`runId` guards stale work.** Cancel and every new run bump it; each async step re-checks `isCurrent` before acting.
 - **Hot reloads reset module variables** (timers included); `$.state` and `$.store` survive. `session.start` resets a run a reload left `continuing` (its timer is gone); a `saving` run survives, since its next step is the save turn's `turn.complete`.
+- **A new process loses `$.state` too.** An upgrade can move a `--bg` session to a new process mid-turn (seen 2026-10-27 on 2.1.311 → 2.1.312; the transcript resumes with "Continuing an interrupted response", and `$.session.id()`, the transcript's name, stays the same). So each run in progress is also recorded in `$.store` under `run/<session id>` (`RunRecord`: `saving` from `/relay`, `continuing` once the note is written), and every end of a run (`finish`, cancel, a reload's reset) deletes it. `session.start` with an idle `$.state` and a record for this session logs the lost run. For a `saving` record, the first main-loop `turn.complete` after that is taken as the resumed save turn: if it carries a tagged note (`taggedNote`, no whole-message fallback), relay writes it to the note path and says to `/compact` and send it. Nothing is forked or compacted. Records older than a week are pruned at `session.start`. The engine gives no signal for a new process or a resumed turn, hence the record.
 - Reporting is best effort and must never throw out of a hook or timer.
 
 ## Conventions

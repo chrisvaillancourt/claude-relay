@@ -1,4 +1,4 @@
-import type { Command, Hold } from '../types'
+import type { Command, Hold, RunRecord } from '../types'
 
 /** Leads the save prompt, so the save turn can be told apart by its text. */
 export const SAVE_MARKER = '[relay] Checkpoint before compaction.'
@@ -81,8 +81,57 @@ function ownLineNotes(answer: string): string[] {
  * tags sit on their own lines, else the last inline pair, else the whole message.
  */
 export function extractNote(answer: string): string {
-  const note = ownLineNotes(answer).at(-1) ?? [...answer.matchAll(INLINE_NOTE)].at(-1)?.[1] ?? answer
-  return note.trim()
+  return taggedNote(answer) ?? answer.trim()
+}
+
+/** The note inside <handoff-note> tags, as `extractNote` finds it, or null when the answer has none. */
+export function taggedNote(answer: string): string | null {
+  const note = ownLineNotes(answer).at(-1) ?? [...answer.matchAll(INLINE_NOTE)].at(-1)?.[1]
+  return note === undefined ? null : note.trim()
+}
+
+export const RUN_KEY_PREFIX = 'run/'
+
+/** Where a run in progress is kept in `$.store`, one key per session, so a new process can tell it was lost. */
+export function runKey(sessionId: string): string {
+  return `${RUN_KEY_PREFIX}${sessionId}`
+}
+
+export function isRunRecord(value: unknown): value is RunRecord {
+  if (typeof value !== 'object' || value === null) return false
+  const v = value as Record<string, unknown>
+  return (v.phase === 'saving' || v.phase === 'continuing') && typeof v.notePath === 'string' && typeof v.startedAt === 'number'
+}
+
+function clockTime(ms: number): string {
+  return `${new Date(ms).toISOString().slice(11, 16)}Z`
+}
+
+/**
+ * What to tell the person when a new process (an upgrade, a background
+ * session moved to another host, a crash and resume) finds a run its
+ * predecessor didn't finish: the run's state and timers died with that process.
+ */
+export function restartNotice(record: RunRecord): string {
+  const which = `the /relay started at ${clockTime(record.startedAt)}`
+  if (record.phase === 'saving') {
+    return (
+      `stopped: Claude Code restarted this session during the save turn of ${which}, so the run was lost. Nothing was compacted. ` +
+      `If the resumed turn ends with a handoff note, relay saves it to ${record.notePath}; otherwise /relay to start over.`
+    )
+  }
+  return (
+    `stopped: Claude Code restarted this session after the save turn of ${which}, so the run was lost. The handoff note is at ${record.notePath}. ` +
+    `If the conversation wasn't compacted: /compact, then send "Continue from @${record.notePath}". Or /relay to start over.`
+  )
+}
+
+/** After a restart lost the run, relay saved the resumed save turn's note; what's left to do. */
+export function resumedNoteNotice(notePath: string): string {
+  return (
+    `saved the resumed turn's handoff note to ${notePath}, but nothing was compacted, since a restart lost the run. ` +
+    `To finish: /compact, then send "Continue from @${notePath}". Or /relay to start over.`
+  )
 }
 
 /** Longest stretch of the note quoted into the fork prompt. */
