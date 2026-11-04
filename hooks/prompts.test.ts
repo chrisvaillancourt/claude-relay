@@ -63,6 +63,17 @@ describe('savePrompt', () => {
   test('empty save instructions keep the default first step', async () => {
     expect(savePrompt('', '/tmp/x.md', '')).toBe(savePrompt('', '/tmp/x.md'))
   })
+
+  test('says the same session continues after compaction and asks for running delegates by id', async () => {
+    for (const p of [savePrompt('', '/tmp/x.md'), savePrompt('', '/tmp/x.md', 'Follow the closeout skill.')]) {
+      expect(p).not.toMatch(/\b(next|new|fresh) session\b/i)
+      expect(p).toMatch(/same (session|process)/i)
+      expect(p).toMatch(/subagent/i)
+      expect(p).toMatch(/background (session|job)/i)
+      expect(p).toMatch(/\bids?\b/i)
+      expect(p).toMatch(/report/i)
+    }
+  })
 })
 
 describe('cleanContinuation', () => {
@@ -160,6 +171,18 @@ describe('continuationPrompt', () => {
     expect(CONTINUATION_PROMPT).toMatch(/AGENTS\.md/)
     expect(CONTINUATION_PROMPT).toMatch(/don't tell the agent to read them/i)
     expect(CONTINUATION_PROMPT).not.toMatch(/Point to the files/)
+  })
+
+  test('tells the fork that running agents survive compaction and to check ListAgents before relaunching', async () => {
+    expect(CONTINUATION_PROMPT).not.toMatch(/\b(next|new|fresh) session\b/i)
+    expect(CONTINUATION_PROMPT).toMatch(/same session/i)
+    expect(CONTINUATION_PROMPT).toMatch(/subagent/i)
+    expect(CONTINUATION_PROMPT).toMatch(/still (alive|running)/i)
+    expect(CONTINUATION_PROMPT).toMatch(/notifications still arrive/i)
+    expect(CONTINUATION_PROMPT).toContain('ListAgents')
+    expect(CONTINUATION_PROMPT).toMatch(/\bids?\b/i)
+    expect(CONTINUATION_PROMPT).toMatch(/uncommitted/i)
+    expect(CONTINUATION_PROMPT).toMatch(/relaunch/i)
   })
 })
 

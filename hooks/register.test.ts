@@ -10,7 +10,7 @@ const T0 = Date.UTC(2026, 9, 7, 15, 0)
 const SEC = 1000
 const CONTINUATION = '@notes/hub.md\n@notes/log.md\nResume at step 3; the staging deploy is still running.'
 const SAVE_ANSWER = '# Handoff\n\nStep 2 of 3 done; notes/hub.md is current.'
-/** The note as relay saves it: the session id added, so the next session can find this one. */
+/** The note as relay saves it: the session id added, so a later session can find this one. */
 const NOTED = `${SAVE_ANSWER}\n\nSession: sid-1`
 /** Where the note lands for T0, a TMPDIR of /tmp/T/ and a project root of /work/my-proj. */
 const NOTE = '/tmp/T/claude-relay/my-proj-20261007T150000Z.md'
@@ -1239,7 +1239,7 @@ describe('subagent turns are not the main loop', () => {
   })
 })
 
-describe('what relay leaves for the next session', () => {
+describe('what relay leaves for after the compaction', () => {
   test('a note that already names this session is saved as it is', async ($, on) => {
     const w = world(on, { answer: `${SAVE_ANSWER}\n\nSession: sid-1 (searchable)` })
     await start($)

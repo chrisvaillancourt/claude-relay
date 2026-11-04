@@ -23,12 +23,13 @@ export const DEFAULT_SAVE_STEP =
  */
 export function savePrompt(focus: string, notePath: string, saveInstructions = ''): string {
   const lines = [
-    `${SAVE_MARKER} The conversation will be compacted after this turn, and the next session starts from what you leave now.`,
+    `${SAVE_MARKER} The conversation will be compacted after this turn and then continues in this same session and process, starting from what you leave now. Subagents, background sessions and background jobs you started keep running through the compaction and still report when they finish.`,
     '',
     `1. ${saveInstructions.trim() || DEFAULT_SAVE_STEP}`,
-    `2. Then, after your last tool call, end with the handoff note inside <handoff-note> and </handoff-note> tags, each on its own line. What's inside the tags is saved to ${notePath} for the next session; don't write that file yourself.`,
-    '3. In the note, record what is done; what is in progress, exactly where it stands (branches, uncommitted changes, running jobs, open PRs); decisions and why; what you learned; issues, gotchas and workarounds; next steps, each with a disposition (do / skip / defer); and the files you wrote or updated this session.',
-    "4. Link to what's already durable instead of repeating it.",
+    `2. Then, after your last tool call, end with the handoff note inside <handoff-note> and </handoff-note> tags, each on its own line. What's inside the tags is saved to ${notePath} for after the compaction; don't write that file yourself.`,
+    '3. In the note, record what is done; what is in progress, exactly where it stands (branches, uncommitted changes, open PRs); decisions and why; what you learned; issues, gotchas and workarounds; next steps, each with a disposition (do / skip / defer); and the files you wrote or updated this session.',
+    '4. In the note, list every subagent, background session and background job still running, each with its id or name, what it is doing (and which files it may be editing), and how it will report back.',
+    "5. Link to what's already durable instead of repeating it.",
     '',
     "Don't start new work.",
   ]
@@ -38,9 +39,11 @@ export function savePrompt(focus: string, notePath: string, saveInstructions = '
 
 /** The side question asked over the transcript once the save turn ends (what `/btw` would be asked). */
 export const CONTINUATION_PROMPT =
-  'Give me a concise, copy/paste-ready prompt to continue in the next session. ' +
-  'Open with one line saying what to continue, then a line reading "Come up to speed:" and the files the next agent should read first, one per line, each path prefixed with `@`. ' +
+  'Give me a concise, copy/paste-ready prompt to continue this work after the conversation is compacted. ' +
+  'Open with one line saying what to continue, then a line reading "Come up to speed:" and the files the agent should read first, one per line, each path prefixed with `@`. ' +
   "The harness attaches the @ files and loads AGENTS.md, CLAUDE.md and other instruction files by itself, so don't tell the agent to read them, and don't list instruction files. " +
+  'Compaction keeps the same session in the same process, so subagents, background sessions and background jobs started before it are still alive and their notifications still arrive. ' +
+  'If any are running, list each by id or name with what it is doing, and tell the agent to check ListAgents and the task list before treating one as dead or relaunching it (if this prompt is used in a different session, where they won\'t be listed, to ask before relaunching), and never to infer that one died from uncommitted files or missing commits. ' +
   "Add anything else they need to know that those files don't say, without repeating what they do. " +
   'Output only the prompt: no preamble, no wrapper formatting, no code fence.'
 
@@ -91,7 +94,7 @@ export function taggedNote(answer: string): string | null {
 }
 
 /**
- * The note with a `Session: <id>` line, so the next session can find this
+ * The note with a `Session: <id>` line, so a later session can find this
  * one's transcript. A note that already names this session is left alone;
  * a `Session:` line copied from an earlier note doesn't count.
  */
