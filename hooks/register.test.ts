@@ -38,6 +38,8 @@ type WorldOpts = {
   store?: Record<string, unknown>
   /** TMPDIR as the environment has it; null for unset. */
   tmpdir?: string | null
+  /** Files on disk besides the ones the plugin wrote, by path. */
+  files?: Record<string, string>
   writeFails?: boolean
   /** The context's size as the status line has it; null for unknown. */
   tokens?: number | null
@@ -67,7 +69,7 @@ const world = (on: On, opts: WorldOpts = {}) => {
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
-  mock.env(on, opts.tmpdir === null ? {} : { TMPDIR: opts.tmpdir ?? '/tmp/T/' })
+  mock.env(on, { HOME: '/home/u', ...(opts.tmpdir === null ? {} : { TMPDIR: opts.tmpdir ?? '/tmp/T/' }) })
   const writes: { path: string; text: string }[] = []
   on('fs.write', ($, e) => {
     if (opts.writeFails) return { deny: 'read-only file system' }
@@ -76,7 +78,8 @@ const world = (on: On, opts: WorldOpts = {}) => {
   })
   on('fs.read', ($, e) => {
     const file = writes.findLast(w => w.path === e.path)
-    return file ? { value: file.text } : { deny: 'no such file' }
+    const text = file?.text ?? opts.files?.[e.path]
+    return text === undefined ? { deny: 'no such file' } : { value: text }
   })
   on('session.root', () => ({ value: '/work/my-proj' }))
   const calls: string[] = []
@@ -447,6 +450,24 @@ describe('/relay', () => {
 
     expect(w.compacts[0]?.startsWith('Keep the plan.\n\n')).toBe(true)
     expect(w.copies.length).toBe(0)
+  })
+
+  test('an instructions file replaces the compaction instructions, read when the compaction starts', { options: { compactInstructions: 'Keep the plan.', instructionsFile: ' ~/hooks/compact.md ' } }, async ($, on) => {
+    const w = world(on, { files: { '/home/u/hooks/compact.md': 'Keep ids exactly.\n' } })
+    await start($)
+    await relayRun($, w)
+
+    expect(w.compacts[0]?.startsWith('Keep ids exactly.\n\nA handoff note is saved at ')).toBe(true)
+  })
+
+  test('an instructions file that is missing or empty falls back to the compaction instructions, and the log says so', { options: { compactInstructions: 'Keep the plan.', instructionsFile: '/nope/compact.md' } }, async ($, on) => {
+    const w = world(on, { files: { '/nope/other.md': 'x' } })
+    await start($)
+    await relayRun($, w)
+
+    expect(w.compacts[0]?.startsWith('Keep the plan.\n\n')).toBe(true)
+    expect(w.logs.some(l => l.includes('/nope/compact.md'))).toBe(true)
+    expect(w.calls).toEqual(['submit', 'compact', 'fill'])
   })
 
   test('custom save instructions reach the save prompt', { options: { saveInstructions: '  Follow the closeout skill.  ' } }, async ($, on) => {

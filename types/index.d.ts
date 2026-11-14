@@ -8,6 +8,8 @@ export type Config = {
   noteDir: string
   /** Replaces the save turn's first step; empty for the default (update stale docs in place). */
   saveInstructions: string
+  /** A file whose text replaces compactInstructions; empty for none. A leading ~ is the home directory. */
+  instructionsFile: string
   /** Fill the box as compaction starts (true) or once it has finished (false). */
   fillDuringCompaction: boolean
   /** A handoff the agent starts by itself is declined below this context size. */

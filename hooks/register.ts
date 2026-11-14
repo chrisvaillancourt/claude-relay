@@ -108,6 +108,7 @@ function configFrom(options: PluginOptions): Config {
     copyToClipboard: options.copyToClipboard !== false,
     noteDir: typeof options.noteDir === 'string' ? options.noteDir.trim() : '',
     saveInstructions: typeof options.saveInstructions === 'string' ? options.saveInstructions.trim() : '',
+    instructionsFile: typeof options.instructionsFile === 'string' ? options.instructionsFile.trim() : '',
     fillDuringCompaction: options.fillDuringCompaction !== false,
     minTokens,
   }
@@ -408,6 +409,26 @@ async function promptText($: EngineInterface, run: Run): Promise<string> {
   }
 }
 
+/**
+ * What the person wants the summary to keep: the instructions file's text when
+ * one is set and readable, else `compactInstructions`. Read at each compaction,
+ * so an edit to the file needs no reload.
+ */
+async function baseInstructions($: EngineInterface): Promise<string> {
+  if (!config.instructionsFile) return config.compactInstructions
+  let path = config.instructionsFile
+  try {
+    if (path === '~' || path.startsWith('~/')) path = `${(await $.env.get('HOME')) ?? '~'}${path.slice(1)}`
+    const content = await $.fs.read(path)
+    const text = typeof content === 'string' ? content.trim() : ''
+    if (text) return text
+    $.ui.log(`instructions file ${path} is empty; compacting with compactInstructions`)
+  } catch (err) {
+    $.ui.log(`instructions file ${path} unreadable (${errorText(err)}); compacting with compactInstructions`)
+  }
+  return config.compactInstructions
+}
+
 /** One compaction; a headless session refuses `$.session.compact`, and runs /compact instead. */
 async function compactOnce($: EngineInterface, instructions: string): Promise<{ skip?: string }> {
   if (isInteractive) {
@@ -470,7 +491,7 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
   }
   const run = await read($, runAtom)
   const mode = deliverMode(run)
-  const instructions = compactInstructionsFor(config.compactInstructions, run.notePath ?? '')
+  const instructions = compactInstructionsFor(await baseInstructions($), run.notePath ?? '')
   let result
   try {
     compaction = { runId, state: 'pending' }
