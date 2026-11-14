@@ -1,30 +1,66 @@
 # relay
 
-A Claude Code mod (function-hook plugin) that turns the checkpoint-compact-continue routine into one command, `/relay`.
+A Claude Code mod (function-hook plugin) that hands a long session off to itself across a compaction. The state goes to files first, so the conversation can drop detail it no longer needs without losing it.
 
-When a session's context is getting full, `/relay`:
+There are two ways in, and both end in the same tool call:
 
-1. **Saves.** It submits a save turn. The model updates the project's docs and notes that the session made stale, in place (or follows your `saveInstructions`), then ends the turn with a handoff note inside `<handoff-note>` tags. The note covers what's done, what's in progress, decisions, lessons, gotchas, workarounds, next steps and the files touched, and lists every subagent, background session and background job still running, with its id, what it's doing and how it will report. Compaction keeps the same session and process, so those keep running and still report afterward. The plugin writes the note to a temp file, `$TMPDIR/claude-relay/<project>-<UTC time>.md` (`/tmp` when `TMPDIR` is unset), so nothing new lands in the repo. Unless the note already names this session, relay adds a `Session: <id>` line, so a later session can find this one's transcript. The model doesn't write that file itself, so there's no permission prompt for a path outside the project.
+- **You** type `/relay`. relay submits a save turn that updates stale docs and then calls the handoff tool.
+- **The agent** calls the `mcp__relay__handoff` tool by itself at a logical stopping point, with nobody at the keyboard.
+
+## What a handoff does
+
+1. **Saves.** The model calls `mcp__relay__handoff` with a handoff note, a continuation prompt and the files to read first. The note covers what's done, what's in progress, decisions, your standing instructions still in force, lessons, gotchas, next steps, the files touched, and every subagent, background session and background job still running (id, what it's doing, how it reports). relay writes the note to `$TMPDIR/claude-relay/<project>-<UTC time>.md` (`/tmp` when `TMPDIR` is unset) and the prompt beside it as `<note>.prompt.md`, so nothing new lands in the repo and no permission prompt is raised for a path outside the project. Unless the note already names this session, relay adds a `Session: <id>` line, so a later session can find this one's transcript. The note is saved whole, at any length.
 
    macOS clears `$TMPDIR` on reboot and removes files left unused for about 3 days. That's fine for the continuation; set `noteDir` if you want notes kept longer.
-2. **Drafts the continuation prompt.** Once the save turn ends, it asks a side question over the transcript with `$.model.fork`, the cache-served, tool-less side question `/btw` asks. The fork replays the last request, which ends before the save turn's final message, so the note is quoted into the question. The answer is a copy/paste-ready prompt: one line on what to continue, then "Come up to speed:" and the files to read (`@path`, the temp note first), plus only what those files don't say. It tells the agent that compaction keeps the same session, so subagents and background jobs started before it are still alive and still report; it lists them by id and says to check `ListAgents` and the task list before treating one as dead or relaunching it, never inferring that from uncommitted files or missing commits. It doesn't tell the agent to read the `@` files or instruction files such as `AGENTS.md` and `CLAUDE.md`, since the harness attaches and loads those itself. The fork doesn't add the question or the answer to the conversation. The prompt is saved to the plugin's store, written beside the note as `<note>.prompt.md` (so you can compare it with what you sent), and, by default, copied to the clipboard.
-3. **Compacts.** It runs the same compaction `/compact` does, with your instructions (default: keep what's helpful and not written to a durable location).
-4. **Delivers.** It fills the prompt box with the continuation prompt, ahead of anything you'd typed there, as compaction starts. Review it and press Enter: pressed while compaction runs, Enter queues the prompt to run once compaction finishes. A typed prompt expands `@` mentions; a plugin's submitted prompt doesn't. Set `fillDuringCompaction` to `false` to fill only after compaction.
+2. **Compacts when that turn ends.** It runs the same compaction `/compact` does, with your instructions (default: keep what's helpful and not written to a durable location) plus one of relay's own: the note is on disk and is read again right after, so the summary can stay short where the note covers something, and keeps in full your standing instructions, what the note leaves out and what happened after it.
+3. **Delivers the continuation prompt.** The prompt is the agent's own text, then "Come up to speed:" and the files to read (`@path`, the note first), then a fixed reminder that compaction keeps the same session and process: subagents and background jobs are still running, and the agent should check `ListAgents` and the task list before treating one as dead or relaunching it.
+   - **A run you started** fills the prompt box, ahead of anything you'd typed there, as compaction starts. Review it and press Enter: pressed while compaction runs, Enter queues the prompt to run once compaction finishes. A typed prompt expands `@` mentions. Set `fillDuringCompaction` to `false` to fill only after compaction, or `deliver` to `submit` to send it without review.
+   - **A run the agent started** is always sent at once, since nobody may be there to press Enter. A plugin's prompt doesn't expand `@` mentions, so the model is told to read the files.
 
-From the start of the save turn until your next prompt's turn starts, relay holds background deliveries that would start a turn on their own: a background shell or agent finishing, another session's or a coordinating session's message, a scheduled prompt. Each is dropped with a note saying relay is holding it. Your next prompt carries them as context, in the order they arrived, and anything dequeued after you press Enter but before your turn starts follows that turn as a message from relay. So nothing runs between the checkpoint and the continuation prompt, and a notification right after the save turn no longer stops the run. A delivery into a running turn isn't held. A prompt you type into the running save turn doesn't end the hold. Two kinds of message aren't held: a channel message (Slack or Telegram through an MCP server), since that may be you driving the session remotely, and a teammate's message, which the engine gives no origin, the same as a command queued with no stamp, which could be yours. If the run fails before the prompt reaches the box, a failure hands them back as a message from relay; if the box can't be filled, they stay held for the prompt you paste. If a prompt that took them is refused further down, they go back on hold. If a hand-back is itself refused, the log shows the messages in full, so nothing is lost silently. `/relay status` shows how many are held, and `/relay cancel` releases them at any time.
+No model call is made besides the compaction itself: the continuation prompt is written by the turn that knows the work, not drafted afterward.
 
-If any step fails, the run stops before the next one and logs why:
+## When the agent hands off by itself
 
-- A failed or interrupted save turn, a missing note, a note that can't be written, or a failed fork never compacts.
-- If you cancel the compaction (Esc or Ctrl+C), the run stops; the prompt is already in the box (or, with `fillDuringCompaction` off, saved for `/relay paste`), and the log says to `/compact` before sending it.
-- If you start another turn before compaction (say, a prompt you queued during the save turn), the run stops rather than compacting over it.
-- If compaction fails or is skipped, the prompt is already in the box (with `fillDuringCompaction` off, nothing is filled and the prompt stays saved for `/relay paste`). The log says to run `/compact` before sending it; a prompt you already queued runs on the uncompacted conversation. A rejected compaction is retried twice, 2 s apart, in case the save turn is still winding down; meanwhile the status says not to send the prompt yet, and a prompt sent then runs on the uncompacted conversation (the log says so).
-- If the save turn can't be identified within 5 s of starting (another plugin rewrote the prompt), the run stops.
-- If Claude Code restarts the session mid-run (an upgrade that moves a background session to a new process, or a crash and resume), the run's state dies with the old process. relay keeps each run in progress in its store, so the new process logs that the run was lost and what to do next, with a toast and a desktop notification saying so (and, for a restart during the save turn, that nothing was compacted). The notification reaches your settings `Notification` hooks (as `plugin_notification`) even in a detached `claude --bg` session, where there's no terminal to show it, so a hook that raises a system notification tells you while you're away. If the restart came during the save turn and the resumed turn ends with a handoff note, relay saves that note to its path and logs the rest: `/compact`, then send `Continue from @<note>`, or `/relay` to start over. Records left by sessions never resumed are dropped after a week.
+The tool is in the model's tool list with a description of when to use it: at a logical stopping point, when the context is large and work remains; not when the task is nearly done or while waiting on you. Before calling, the agent updates the docs, notes and tickets the session made stale, so the note links to them instead of repeating them.
 
-Headless sessions (`-p`, SDK) can't compact from a plugin on Claude Code 2.1.294, so there `/relay` saves and drafts the prompt, then stops with the prompt saved.
+relay declines the call, and says why, when:
 
-Tested end to end in an interactive session on Claude Code 2.1.294: save turn, note written to `$TMPDIR`, fork, compaction (35k → 3k tokens) and fill. Pressing Enter on the filled prompt attached the temp note through its `@` path with no permission prompt. 0.4.0's fill during compaction and the hold are covered by `claude plugin test`; whether Enter during a compaction queues the prompt is the engine's behavior and is still to be checked live.
+- the context is under `minTokens` (default 100,000), where a compaction costs more than it saves; `/relay` hands off at any size;
+- a subagent or teammate calls it (only the main conversation is compacted);
+- `note` or `continuation` is missing;
+- a handoff is already saved for this turn;
+- you cancelled this turn's `/relay`, or typed a prompt over the running turn: your prompt runs next, and a handoff now would compact over it. The block ends when the next turn starts.
+
+Headless sessions (`claude -p`, SDK) register the tool but not `/relay`. There relay compacts through `/compact` as the turn ends and sends the continuation. This path follows what the checkpoint mod does on Claude Code 2.1.312 and is covered by `claude plugin test`, not yet by a live headless run. `/compact` run this way doesn't report a skip (a `PreCompact` hook's veto), so relay checks that the context shrank and stops the run if it didn't.
+
+## Nothing runs between the handoff and the continuation
+
+From the handoff call until the continuation prompt's turn starts, relay holds deliveries that would start a turn on their own: a background shell or agent finishing, another session's or a coordinating session's message, a scheduled prompt, and a teammate's message or idle notice. Each is taken with a note saying relay is holding it. The continuation prompt carries them, in the order they arrived: as context on the prompt you send, or in the text of the one relay sends. Anything that arrives after you press Enter but before your turn starts follows that turn as a message from relay.
+
+A teammate's message raises no `prompt.submit` on Claude Code 2.1.325. It arrives at `session.receive`, and starts a turn once the session is idle even when it came in while a turn was running, so relay holds it there and names its sender. A delivery into a running turn (a task notification with a turn id) isn't held. Two kinds aren't held at all: a channel message (Slack or Telegram through an MCP server), since that may be you driving the session remotely, and a command queued with no stamp, which could be yours.
+
+A message that was already queued before the handoff call can't be taken back, and starts a turn the moment the handoff's turn ends. relay doesn't stop for that: it waits for that turn to end, then compacts and delivers, and the continuation prompt says a turn ran after the note and that the compaction summary is the newer of the two. It waits out up to three such turns in a row; a fourth stops the run.
+
+If the run fails before the prompt reaches the box, the held messages go back to the session as a message from relay; if the box can't be filled, they stay held for the prompt you paste. If a prompt that took them is refused further down, they go back on hold. If a hand-back is itself refused, the log shows the messages in full, so nothing is lost silently. What's held is also kept in relay's store, since a held teammate message is in no queue and no transcript: if Claude Code restarts the session, the new process hands it back. `/relay status` shows how many are held, and `/relay cancel` releases them at any time.
+
+## When a run stops
+
+If any step fails, the run stops before the next one. The tool's answer told the model a compaction was coming, so relay always corrects that, without needing anyone to notice a toast:
+
+- **The agent's own run:** relay sends the model a message that the conversation was NOT compacted, why, and where the note is, so it carries on and can hand off again later.
+- **Your run:** your next prompt carries the same message as context the model reads; if relay has held messages to hand back first, the message goes with them, so that turn doesn't run believing in a compaction either. The log has the reason, with a toast and a desktop notification (which reaches your `Notification` hooks as `plugin_notification` even in a detached `claude --bg` session).
+
+What stops a run:
+
+- The save turn ends without calling the tool, or is interrupted; the note can't be written.
+- **Your own prompt arrives before the compaction** (typed into the save turn before or after the tool call, queued behind it, or sent between compaction retries with nothing in the box). It's yours to run now, so the run stops rather than compacting over it, and that prompt tells the model. A prompt you send while the compaction is in flight is queued behind it and the run goes on.
+- The continuation prompt is refused further down (another plugin's hook) after the compaction. For the agent's run, relay then points the model at the prompt file.
+- You cancel the compaction (Esc or Ctrl+C). The prompt is already in the box (or, with `fillDuringCompaction` off, saved for `/relay paste`), and the log says to `/compact` before sending it.
+- Compaction fails or is skipped. A rejected compaction is retried twice, 2 s apart; meanwhile the status says not to send the prompt yet. With the prompt already in the box, sending it then runs it on the uncompacted conversation, and the model is told so.
+- The save turn can't be identified within 5 s of starting (another plugin rewrote the prompt).
+- A turn the compaction was waiting for is interrupted.
+- **A plugin reload during the compaction** resets the run. The log (and, for the agent's run, a message to the model) says where the note and the continuation prompt are. A reload before the turn ends doesn't lose the run: it delivers from the prompt saved beside the note.
+- **Claude Code restarts the session mid-run** (an upgrade that moves a background session to a new process, or a crash and resume). The run's state dies with the old process, so relay keeps each run in progress in its store; the new process logs that the run was lost and what to do next, with a toast and a desktop notification, and tells the model when the run was the agent's. Records left by sessions never resumed are dropped after a week.
 
 ## Command
 
@@ -51,24 +87,25 @@ Set in `/config`, or in settings under `pluginConfigs["relay@relay"].options` (t
 
 | Option | Default | |
 | --- | --- | --- |
-| `deliver` | `fill` | `fill` puts the prompt in the box. `submit` sends it at once and tells the model to read the `@` files, since a plugin's prompt doesn't attach them. |
-| `compactInstructions` | Keep any information that's helpful to the agent and not written to a durable location. | What the compaction summary keeps. |
+| `deliver` | `fill` | For a run you start. `fill` puts the prompt in the box. `submit` sends it at once and tells the model to read the `@` files, since a plugin's prompt doesn't attach them. The agent's own run is always sent. |
+| `compactInstructions` | Keep any information that's helpful to the agent and not written to a durable location. | What the compaction summary keeps. relay adds that the note is on disk. |
 | `noteDir` | empty | Directory for handoff notes. Empty: `$TMPDIR/claude-relay` (else `/tmp/claude-relay`). |
-| `copyToClipboard` | `true` | Also copy the continuation prompt to the clipboard. |
+| `copyToClipboard` | `true` | Also copy the continuation prompt to the clipboard (runs you start only). |
 | `saveInstructions` | empty | Replaces the save turn's first step (update stale docs and notes in place). See below. |
 | `fillDuringCompaction` | `true` | With `deliver: fill`, fill the box as compaction starts, so you can queue the prompt. `false`: fill once compaction has finished. |
+| `minTokens` | `100000` | The agent's own handoff is declined below this context size. |
 
-The save and continuation prompts live in `hooks/prompts.ts`.
+The save prompt, the tool's description and the continuation prompt's fixed text live in `hooks/prompts.ts`.
 
 ### Your own save step
 
-`saveInstructions` replaces only the save turn's first step. relay still asks for the handoff note inside `<handoff-note>` tags, tells the model not to write the note file, and says not to start new work, since it needs the tagged note for the continuation prompt. Use it to run your own closeout routine, for example a skill:
+`saveInstructions` replaces only the save turn's first step. relay still asks for the handoff tool call and says not to start new work. Use it to run your own closeout routine, for example a skill:
 
 ```text
 Follow the saving-session-state skill.
 ```
 
-A skill named there must be one the model can invoke (no `disable-model-invocation`), because the save turn asks the model to load it. Whatever it runs shouldn't stop to ask questions: relay continues only once the save turn ends with the tagged note.
+A skill named there must be one the model can invoke (no `disable-model-invocation`), because the save turn asks the model to load it. Whatever it runs shouldn't stop to ask questions: relay continues only once the save turn calls the tool and ends.
 
 ## Troubleshooting
 
@@ -76,10 +113,19 @@ Each run writes one line to the debug log when it ends (`claude --debug`, or `~/
 
 ```sh
 grep -h 'relay\] .*run done' ~/.claude/debug/*.txt
-# [relay] $.ui.log: run done phase=saving|continuing outcome=delivered|stopped|cancelled deliver=fill|submit
+# [relay] $.ui.log: run done phase=saving|armed|continuing outcome=delivered|stopped|cancelled deliver=fill|submit source=person|agent
 ```
 
-`phase=saving` ended before the save turn finished; `continuing` got past it. A `stopped` line is followed by the reason. Headless sessions (`claude -p`, SDK) don't register `/relay`, and a refused registration logs `/relay not registered: …` instead of stopping the session start.
+`phase=saving` ended before the tool call; `armed` after it, before the turn ended; `continuing` got to the compaction. A `stopped` line is followed by the reason. A compaction that waited for a turn logs `compaction deferred (n)`. A refused registration logs `/relay not registered: …` or `tool handoff not registered: …` instead of stopping the session start.
+
+## What has been checked live
+
+- Claude Code 2.1.294, interactive: an earlier version's save turn, note in `$TMPDIR`, compaction (35k → 3k tokens) and fill; Enter on the filled prompt attached the note through its `@` path with no permission prompt.
+- Enter during a compaction queues the prompt, which runs once compaction finishes (confirmed by use, 2026-11).
+- Claude Code 2.1.325, 2026-11-14, with an observer mod and a live teammate: a teammate's message and idle notice raise `session.receive` with origin `{kind: "peer", teammate, isVerified: true}` and no `prompt.submit`; one that arrives mid-turn starts a turn of its own when the running turn ends.
+- Claude Code 2.1.325, 2026-11-14, interactive, a handoff the agent started: the tool call saved the note and the prompt, the conversation was compacted when the turn ended, and the continuation prompt arrived as a submitted message with the note listed first. A background job that finished during the compaction didn't start a turn; its notification arrived inside the continuation prompt. The debug log read `run done phase=continuing outcome=delivered deliver=submit source=agent`.
+
+Not yet run live: the headless path, and holding a teammate's message at `session.receive` (that `{consumed}` there keeps it out of the queue is from the API types). Everything else here is covered by `claude plugin test`.
 
 ## Install
 
@@ -90,7 +136,7 @@ claude plugin marketplace add chrisvaillancourt/claude-relay
 claude plugin install relay@relay --scope user
 ```
 
-The install may say the `userConfig` options aren't set yet; until you set them, the defaults below apply. A GitHub install runs a copy. It updates only when `version` in `plugin.json` changes: `claude plugin marketplace update relay`, then `claude plugin update relay@relay`.
+The install may say the `userConfig` options aren't set yet; until you set them, the defaults above apply. A GitHub install runs a copy. It updates only when `version` in `plugin.json` changes: `claude plugin marketplace update relay`, then `claude plugin update relay@relay`.
 
 Or from a local clone:
 

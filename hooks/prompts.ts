@@ -1,7 +1,11 @@
-import type { Command, Hold, RunRecord } from '../types'
+import type { Command, Deliver, Hold, RunRecord } from '../types'
 
 /** Leads the save prompt, so the save turn can be told apart by its text. */
 export const SAVE_MARKER = '[relay] Checkpoint before compaction.'
+
+/** The tool's short name, and the name the model calls it by. */
+export const TOOL_NAME = 'handoff'
+export const TOOL = `mcp__relay__${TOOL_NAME}`
 
 /**
  * Where the handoff note goes: `dir` (default: the system temp directory's
@@ -13,23 +17,78 @@ export function notePathFor(dir: string, projectRoot: string, nowMs: number): st
   return `${dir.replace(/\/+$/, '')}/${project}-${stamp}.md`
 }
 
+/** Where the continuation prompt is kept: beside its note, so it can be compared with what was sent. */
+export function promptPathFor(notePath: string): string {
+  return /\.md$/.test(notePath) ? notePath.replace(/\.md$/, '.prompt.md') : `${notePath}.prompt.md`
+}
+
+export const TOOL_DESCRIPTION =
+  'Hand the work off to yourself across a compaction, so a long conversation does not carry detail it no longer needs. ' +
+  'relay saves your handoff note to a file, compacts the conversation when this turn ends, and then continues from the continuation prompt you give now. ' +
+  'Call it at a logical stopping point when the context is large and work remains, or when a [relay] save prompt asks. ' +
+  'Before calling, update the docs, notes and tickets this session made stale, so the note can link to them instead of repeating them. ' +
+  "After the call, end your turn with a one-line status and don't start new work in this turn. " +
+  'The same session and process continue after the compaction, so subagents and background jobs keep running and still report. ' +
+  "Don't call it on your own when the task is nearly done or while you are waiting on the user."
+
+export const TOOL_SCHEMA = {
+  type: 'object',
+  properties: {
+    note: {
+      type: 'string',
+      description:
+        'The handoff note, in Markdown. Record: what is done; what is in progress and exactly where it stands (branches, uncommitted changes, open PRs); ' +
+        "decisions and why; the user's standing instructions and approvals still in force, in their words; what you learned; issues, gotchas and workarounds; " +
+        'next steps, each with a disposition (do / skip / defer); the files you wrote or updated; and every subagent, background session and background job still running, ' +
+        "each with its id or name, what it is doing (and which files it may be editing) and how it reports back. Link to what's already durable instead of repeating it.",
+    },
+    continuation: {
+      type: 'string',
+      description:
+        'The prompt that restarts the work after the compaction: a line or two saying what to continue and the first step, ' +
+        "plus anything the agent must know that the note and the files don't say. relay adds the note's path and the files list.",
+    },
+    files: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Paths of the files to read first after the compaction; relay lists the note itself. ' +
+        'Leave out instruction files such as AGENTS.md and CLAUDE.md, which the harness loads.',
+    },
+  },
+  required: ['note', 'continuation'],
+} as const
+
+export type Handoff = { note: string; continuation: string; files: string[] }
+
+/** The tool call's arguments, or what to tell the model when they can't be used. */
+export function parseHandoff(input: Record<string, unknown>): Handoff | { error: string } {
+  const note = typeof input.note === 'string' ? input.note.trim() : ''
+  const continuation = typeof input.continuation === 'string' ? input.continuation.trim() : ''
+  if (!note || !continuation) {
+    return { error: 'Nothing was saved: `note` and `continuation` must both be non-empty strings. Call the tool again with both.' }
+  }
+  const files = Array.isArray(input.files)
+    ? input.files.filter((f): f is string => typeof f === 'string').map(f => f.trim().replace(/^@/, '')).filter(Boolean)
+    : []
+  return { note, continuation, files }
+}
+
 /** The save turn's default first step, which the `saveInstructions` option replaces. */
 export const DEFAULT_SAVE_STEP =
   "Update the project's docs and notes that this session's work made stale, in place, following CLAUDE.md / AGENTS.md. Don't create a handoff note in the project."
 
 /**
  * The save turn's prompt: update stale docs (or follow `saveInstructions`),
- * then end with the handoff note, which the plugin saves.
+ * then call the handoff tool, which holds the note's and prompt's own guidance.
  */
-export function savePrompt(focus: string, notePath: string, saveInstructions = ''): string {
+export function savePrompt(focus: string, saveInstructions = ''): string {
   const lines = [
     `${SAVE_MARKER} The conversation will be compacted after this turn and then continues in this same session and process, starting from what you leave now. Subagents, background sessions and background jobs you started keep running through the compaction and still report when they finish.`,
     '',
     `1. ${saveInstructions.trim() || DEFAULT_SAVE_STEP}`,
-    `2. Then, after your last tool call, end with the handoff note inside <handoff-note> and </handoff-note> tags, each on its own line. What's inside the tags is saved to ${notePath} for after the compaction; don't write that file yourself.`,
-    '3. In the note, record what is done; what is in progress, exactly where it stands (branches, uncommitted changes, open PRs); decisions and why; what you learned; issues, gotchas and workarounds; next steps, each with a disposition (do / skip / defer); and the files you wrote or updated this session.',
-    '4. In the note, list every subagent, background session and background job still running, each with its id or name, what it is doing (and which files it may be editing), and how it will report back.',
-    "5. Link to what's already durable instead of repeating it.",
+    `2. Then call the ${TOOL} tool (load it with ToolSearch if it isn't loaded) with the handoff note and the continuation prompt, as its description asks. relay saves both to files; don't write a handoff note file yourself.`,
+    '3. Once the tool answers, end the turn with a one-line status.',
     '',
     "Don't start new work.",
   ]
@@ -37,61 +96,57 @@ export function savePrompt(focus: string, notePath: string, saveInstructions = '
   return lines.join('\n')
 }
 
-/** The side question asked over the transcript once the save turn ends (what `/btw` would be asked). */
-export const CONTINUATION_PROMPT =
-  'Give me a concise, copy/paste-ready prompt to continue this work after the conversation is compacted. ' +
-  'Open with one line saying what to continue, then a line reading "Come up to speed:" and the files the agent should read first, one per line, each path prefixed with `@`. ' +
-  "The harness attaches the @ files and loads AGENTS.md, CLAUDE.md and other instruction files by itself, so don't tell the agent to read them, and don't list instruction files. " +
-  'Compaction keeps the same session in the same process, so subagents, background sessions and background jobs started before it are still alive and their notifications still arrive. ' +
-  'If any are running, list each by id or name with what it is doing, and tell the agent to check ListAgents and the task list before treating one as dead or relaunching it (if this prompt is used in a different session, where they won\'t be listed, to ask before relaunching), and never to infer that one died from uncommitted files or missing commits. ' +
-  "Add anything else they need to know that those files don't say, without repeating what they do. " +
-  'Output only the prompt: no preamble, no wrapper formatting, no code fence.'
+/** Follows the files in every continuation prompt: what a compaction does and doesn't end. */
+export const SURVIVORS_NOTE =
+  'Compaction kept this session and process, so the subagents, background sessions and background jobs the note lists are still running and still report. ' +
+  'Check ListAgents and the task list before treating one as dead or relaunching it; never infer that from uncommitted files or missing commits.'
 
-const OPEN_TAG = /^\s*<handoff-note>\s*$/
-const CLOSE_TAG = /^\s*<\/handoff-note>\s*$/
-const FENCE = /^\s*(`{3,}|~{3,})/
-const INLINE_NOTE = /<handoff-note>([\s\S]*?)<\/handoff-note>/g
+/** Added when a turn ran between the note and the compaction. */
+export const STALE_NOTE =
+  'A message arrived and a turn ran after this note was written, before the compaction. The compaction summary covers that turn; where the two differ, the summary is newer.'
 
 /**
- * Blocks between tags on lines of their own, as the save prompt asks. Tag
- * names quoted in prose don't match, and tags inside a code fence (an example
- * in a draft) belong to the note's text.
+ * The continuation prompt as delivered: the agent's own text, the files to
+ * read (`@path`, the note first), and what relay knows about the compaction.
  */
-function ownLineNotes(answer: string): string[] {
-  const lines = answer.split(/\r?\n/)
-  const notes: string[] = []
-  let fence: string | null = null
-  let open: number | null = null
-  lines.forEach((line, i) => {
-    const marker = FENCE.exec(line)?.[1]
-    if (marker) {
-      if (fence === null) fence = marker
-      else if (marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null
-      return
-    }
-    if (fence !== null) return
-    if (OPEN_TAG.test(line)) open = i
-    else if (CLOSE_TAG.test(line) && open !== null) {
-      notes.push(lines.slice(open + 1, i).join('\n'))
-      open = null
-    }
-  })
-  return notes
+export function composeContinuation(handoff: Pick<Handoff, 'continuation' | 'files'>, notePath: string, isStale = false): string {
+  const files = [notePath, ...handoff.files.filter(f => f !== notePath)]
+  const unique = files.filter((f, i) => files.indexOf(f) === i)
+  const parts = [handoff.continuation, `Come up to speed:\n${unique.map(f => `@${f}`).join('\n')}`, SURVIVORS_NOTE]
+  if (isStale) parts.push(STALE_NOTE)
+  return parts.join('\n\n')
 }
 
 /**
- * The note inside the save turn's <handoff-note> tags: the last block whose
- * tags sit on their own lines, else the last inline pair, else the whole message.
+ * What the compaction is asked to keep: the person's instructions, then that
+ * the note is on disk, so the summary needn't carry what the note already does.
  */
-export function extractNote(answer: string): string {
-  return taggedNote(answer) ?? answer.trim()
+export function compactInstructionsFor(base: string, notePath: string): string {
+  return (
+    `${base}\n\n` +
+    `A handoff note is saved at ${notePath}, and the agent reads it again right after this compaction. ` +
+    'Keep the summary short where the note already covers something. ' +
+    "Keep in full the user's standing instructions, anything the note leaves out, and anything that happened after the note was written."
+  )
 }
 
-/** The note inside <handoff-note> tags, as `extractNote` finds it, or null when the answer has none. */
-export function taggedNote(answer: string): string | null {
-  const note = ownLineNotes(answer).at(-1) ?? [...answer.matchAll(INLINE_NOTE)].at(-1)?.[1]
-  return note === undefined ? null : note.trim()
+/** The tool's answer once the note and prompt are saved. */
+export function acceptedText(notePath: string, deliver: Deliver): string {
+  const then = deliver === 'submit' ? 'sends the continuation prompt' : "puts the continuation prompt in the person's prompt box"
+  return (
+    `Handoff saved to ${notePath}. End your turn now with a one-line status, and don't start new work in this turn. ` +
+    `relay compacts the conversation when this turn ends, then ${then}.`
+  )
 }
+
+export function belowMinText(tokens: number, minTokens: number): string {
+  return `Nothing was saved: the context is ${tokens} tokens, under relay's ${minTokens}-token floor for a handoff you start yourself, so a compaction would cost more than it saves. Keep working.`
+}
+
+export const SUBAGENT_TEXT = "Nothing was saved: only the main conversation can hand off. Keep working, and report to the agent that started you as usual."
+export const ALREADY_TEXT = 'A handoff is already saved and waiting for this turn to end. End your turn with a one-line status.'
+export const CANCELLED_TEXT = 'No handoff will run: the person cancelled it or sent a prompt of their own, and the conversation will NOT be compacted. End your turn with a one-line status.'
+export const UNSAVED_TEXT = "Nothing was saved: relay couldn't record the handoff. Keep working, and try again at the next stopping point."
 
 /**
  * The note with a `Session: <id>` line, so a later session can find this
@@ -110,10 +165,19 @@ export function runKey(sessionId: string): string {
   return `${RUN_KEY_PREFIX}${sessionId}`
 }
 
+/** Where a session's held deliveries are kept in `$.store`, so a new process can hand them back. */
+export function heldKey(sessionId: string): string {
+  return `held/${sessionId}`
+}
+
 export function isRunRecord(value: unknown): value is RunRecord {
   if (typeof value !== 'object' || value === null) return false
   const v = value as Record<string, unknown>
-  return (v.phase === 'saving' || v.phase === 'continuing') && typeof v.notePath === 'string' && typeof v.startedAt === 'number'
+  return (
+    (v.phase === 'saving' || v.phase === 'armed' || v.phase === 'continuing') &&
+    typeof v.notePath === 'string' &&
+    typeof v.startedAt === 'number'
+  )
 }
 
 function clockTime(ms: number): string {
@@ -121,71 +185,49 @@ function clockTime(ms: number): string {
 }
 
 /**
- * What to tell the person when a new process (an upgrade, a background
- * session moved to another host, a crash and resume) finds a run its
- * predecessor didn't finish: the run's state and timers died with that process.
+ * What to say when a run was lost with its timers: a new process (an
+ * upgrade, a background session moved to another host, a crash and resume) or
+ * a plugin reload found a run its predecessor didn't finish. Read by the
+ * person in the log, and by the model when the agent started the run.
  */
-export function restartNotice(record: RunRecord): string {
-  const which = `the /relay started at ${clockTime(record.startedAt)}`
+export function lostRunNotice(record: RunRecord, cause: 'restart' | 'reload'): string {
+  const what = cause === 'restart' ? 'Claude Code restarted this session' : 'a plugin reload came'
+  const which = `the relay handoff started at ${clockTime(record.startedAt)}`
   if (record.phase === 'saving') {
+    return `stopped: ${what} during the save turn of ${which}, so the run was lost. Nothing was saved or compacted; /relay to start over.`
+  }
+  if (record.phase === 'armed') {
     return (
-      `stopped: Claude Code restarted this session during the save turn of ${which}, so the run was lost. Nothing was compacted. ` +
-      `If the resumed turn ends with a handoff note, relay saves it to ${record.notePath}; otherwise /relay to start over.`
+      `stopped: ${what} before the turn of ${which} ended, so the run was lost. The conversation was NOT compacted. ` +
+      `The handoff note is at ${record.notePath}. Carry on, and hand off again (/relay, or the ${TOOL} tool) at the next stopping point.`
     )
   }
   return (
-    `stopped: Claude Code restarted this session after the save turn of ${which}, so the run was lost. The handoff note is at ${record.notePath}. ` +
-    `If the conversation wasn't compacted: /compact, then send "Continue from @${record.notePath}". Or /relay to start over.`
+    `stopped: ${what} while ${which} was compacting, so the run was lost and the conversation may not have been compacted. ` +
+    `The handoff note is at ${record.notePath} and the continuation prompt at ${promptPathFor(record.notePath)}: read both and continue from them. ` +
+    'If the conversation is still long, hand off again at the next stopping point.'
   )
 }
-
-/** After a restart lost the run, relay saved the resumed save turn's note; what's left to do. */
-export function resumedNoteNotice(notePath: string): string {
-  return (
-    `saved the resumed turn's handoff note to ${notePath}, but nothing was compacted, since a restart lost the run. ` +
-    `To finish: /compact, then send "Continue from @${notePath}". Or /relay to start over.`
-  )
-}
-
-/** Longest stretch of the note quoted into the fork prompt. */
-const NOTE_LIMIT = 8000
 
 /**
- * The fork replays the main thread's last request, which ends before the save
- * turn's final message (the handoff note), so the note rides along.
+ * What the model is told when a run stopped without compacting, since the
+ * tool's answer had promised a compaction and nothing else would correct it.
  */
-export function continuationPrompt(note: string, notePath: string): string {
-  const trimmed = note.trim()
-  const quoted = trimmed.length > NOTE_LIMIT ? `${trimmed.slice(0, NOTE_LIMIT)}\n[…]` : trimmed
+export function notCompactedNotice(reason: string, notePath: string | null): string {
   return (
-    `The checkpoint turn's final message is the handoff note, saved to ${notePath}:\n\n` +
-    `<handoff-note path="${notePath}">\n${quoted}\n</handoff-note>\n\n` +
-    `List @${notePath} first among the files to read.\n\n${CONTINUATION_PROMPT}`
+    `relay: the handoff stopped, so this conversation was NOT compacted. ${reason}` +
+    (notePath ? ` The handoff note, if it was saved, is at ${notePath}.` : '') +
+    ` Carry on from where things stand, and hand off again (the ${TOOL} tool) at the next stopping point if the context is still large.`
   )
-}
-
-/** Drops one code fence wrapping the whole reply, and surrounding whitespace. */
-export function cleanContinuation(text: string): string {
-  const trimmed = text.trim()
-  const fenced = /^(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n?\1$/.exec(trimmed)
-  if (!fenced) return trimmed
-  const [, fence = '', inner = ''] = fenced
-  // A line opening the same fence inside means several blocks, not one wrapper.
-  const opensAgain = inner.split('\n').some(line => line.trimStart().startsWith(fence))
-  return opensAgain ? trimmed : inner.trim()
-}
-
-/** Where the generated continuation prompt is kept: beside its note, so it can be compared with what was sent. */
-export function promptPathFor(notePath: string): string {
-  return /\.md$/.test(notePath) ? notePath.replace(/\.md$/, '.prompt.md') : `${notePath}.prompt.md`
 }
 
 /**
  * Deliveries that start a turn on their own: background tasks, other
- * sessions, schedules. Held from the save turn's start until the person's
- * next prompt's turn starts, so none runs between the checkpoint and the
- * continuation prompt. Not `channel`: that may be the person driving the
- * session remotely, who couldn't end a hold from there.
+ * sessions, schedules. Held from the handoff until the continuation prompt's
+ * turn starts, so none runs between the two. Not `channel`: that may be the
+ * person driving the session remotely, who couldn't end a hold from there.
+ * Not `unclassified`: a person's unstamped command shares it. A teammate's
+ * message raises no `prompt.submit` at all; it is held at `session.receive`.
  */
 const HELD_ORIGINS = new Set([
   'task-notification',
@@ -207,21 +249,28 @@ export function isPersonOrigin(kind: string): boolean {
   return kind === 'composer' || kind === 'bridge' || kind === 'sdk' || kind === 'slack-ping'
 }
 
+/** A teammate's message as it is held: `session.receive` gives the bare text, so the sender is named here. */
+export function teammateItem(teammate: string, text: string): string {
+  return `Message from teammate ${teammate}:\n${text}`
+}
+
 /** The hold with `text` added, or null when it isn't holding (a release won the race), so the delivery passes. */
 export function holdAppend(cur: Hold, text: string): Hold | null {
   return cur.isHolding ? { ...cur, items: [...cur.items, text] } : null
 }
 
 /**
- * The hold after a prompt that took `taken` (when the hold was at `gen`) was
- * refused further down, or null when the hold has been released or restarted
- * since and must not be revived. A prompt that ended the hold gives it back,
- * items first; one that took nothing leaves another prompt's handoff alone.
+ * The hold after a prompt that took `taken` and `notice` (when the hold was
+ * at `gen`) was refused further down, or null when the hold has been released
+ * or restarted since and must not be revived. A prompt that ended the hold
+ * gives it back, items first; one that took nothing leaves another prompt's
+ * handoff alone.
  */
-export function restoreHold(cur: Hold, taken: readonly string[], gen: number, didEnd: boolean): Hold | null {
+export function restoreHold(cur: Hold, taken: readonly string[], gen: number, didEnd: boolean, notice: string | null = null): Hold | null {
   if ((cur.gen ?? 0) !== gen) return null
-  if (!didEnd) return cur
-  return { ...cur, isHolding: true, endsAtTurn: false, items: [...taken, ...cur.items] }
+  const withNotice = { ...cur, notice: cur.notice ?? notice }
+  if (!didEnd) return withNotice
+  return { ...withNotice, isHolding: true, endsAtTurn: false, items: [...taken, ...cur.items] }
 }
 
 /** The held deliveries, in the order they arrived, for the prompt that ends the hold. */

@@ -1,13 +1,13 @@
 {
   "name": "relay",
-  "version": "0.5.2",
-  "description": "/relay: update stale docs, save a handoff note to a temp file, draft a continuation prompt, compact, and put the prompt in the box.",
+  "version": "0.6.0",
+  "description": "/relay and a handoff tool: update stale docs, save a handoff note to a temp file, compact, and continue from a prompt written before the compaction.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "deliver": {
       "type": "string",
       "title": "Deliver the continuation prompt",
-      "description": "fill: put it in the prompt box for you to review and send (@ mentions expand). submit: send it at once (a plugin's prompt doesn't expand @ mentions, so the model is told to read the files).",
+      "description": "For a run you start with /relay. fill: put the prompt in the box for you to review and send (@ mentions expand). submit: send it at once (a plugin's prompt doesn't expand @ mentions, so the model is told to read the files). A handoff the agent starts by itself is always sent.",
       "options": [
         "fill",
         "submit"
@@ -17,7 +17,7 @@
     "compactInstructions": {
       "type": "string",
       "title": "Compaction instructions",
-      "description": "What the compaction summary should keep, as typed after /compact.",
+      "description": "What the compaction summary should keep, as typed after /compact. relay adds that the handoff note is on disk, so the summary can stay short where the note covers something.",
       "default": "Keep any information that's helpful to the agent and not written to a durable location."
     },
     "noteDir": {
@@ -29,13 +29,13 @@
     "saveInstructions": {
       "type": "string",
       "title": "Save instructions",
-      "description": "Replaces the save turn's first step (update stale docs and notes in place), for example \"Follow the <name> skill.\" A skill named here must be one the model can invoke. The handoff note steps stay, since relay needs the tagged note. Empty: the default step.",
+      "description": "Replaces the save turn's first step (update stale docs and notes in place), for example \"Follow the <name> skill.\" A skill named here must be one the model can invoke. The handoff tool call stays, since relay needs it. Empty: the default step.",
       "default": ""
     },
     "copyToClipboard": {
       "type": "boolean",
       "title": "Copy the continuation prompt",
-      "description": "Also copy the continuation prompt to the clipboard as a backup.",
+      "description": "Also copy the continuation prompt to the clipboard as a backup (runs you start with /relay only).",
       "default": true
     },
     "fillDuringCompaction": {
@@ -43,6 +43,12 @@
       "title": "Fill the prompt box while compacting",
       "description": "With deliver fill: put the continuation prompt in the box as compaction starts, so you can press Enter to queue it before a background task finishes. Off: fill it once compaction has finished.",
       "default": true
+    },
+    "minTokens": {
+      "type": "number",
+      "title": "Minimum context for the agent's own handoff (tokens)",
+      "description": "A handoff the agent starts by itself is declined below this context size, where a compaction costs more than it saves. /relay hands off at any size.",
+      "default": 100000
     }
   },
   "author": {
