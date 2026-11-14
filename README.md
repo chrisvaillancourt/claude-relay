@@ -70,6 +70,17 @@ Follow the saving-session-state skill.
 
 A skill named there must be one the model can invoke (no `disable-model-invocation`), because the save turn asks the model to load it. Whatever it runs shouldn't stop to ask questions: relay continues only once the save turn ends with the tagged note.
 
+## Troubleshooting
+
+Each run writes one line to the debug log when it ends (`claude --debug`, or `~/.claude/debug/<session id>.txt`):
+
+```sh
+grep -h 'relay\] .*run done' ~/.claude/debug/*.txt
+# [relay] $.ui.log: run done phase=saving|continuing outcome=delivered|stopped|cancelled deliver=fill|submit
+```
+
+`phase=saving` ended before the save turn finished; `continuing` got past it. A `stopped` line is followed by the reason. Headless sessions (`claude -p`, SDK) don't register `/relay`, and a refused registration logs `/relay not registered: …` instead of stopping the session start.
+
 ## Install
 
 This repo is its own marketplace. Install from GitHub:

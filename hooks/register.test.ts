@@ -208,6 +208,7 @@ describe('relay', () => {
 
     const status = await relay($, 'status')
     expect(status.text).toMatch(/idle/i)
+    expect(w.logs.filter(l => l.startsWith('run done'))).toEqual(['run done phase=continuing outcome=delivered deliver=fill'])
   })
 
   test('a turn that is not the save turn does not continue the run', async ($, on) => {
@@ -255,6 +256,7 @@ describe('relay', () => {
     expect(w.calls).toEqual(['submit'])
     expect(w.logs.some(l => /stopped/i.test(l))).toBe(true)
     expect((await relay($, 'status')).text).toMatch(/idle/i)
+    expect(w.logs.filter(l => l.startsWith('run done'))).toEqual(['run done phase=saving outcome=stopped deliver=fill'])
   })
 
   test('a failed fork stops before compacting', async ($, on) => {
@@ -383,6 +385,7 @@ describe('relay', () => {
     await saveTurn($, w)
     await w.clock.advance(5 * SEC)
     expect(w.forks.length).toBe(0)
+    expect(w.logs.filter(l => l.startsWith('run done'))).toEqual(['run done phase=saving outcome=cancelled deliver=fill'])
   })
 
   test('refuses to start in an empty conversation', async ($, on) => {

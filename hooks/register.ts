@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register, Timer } from 'claude-code'
+import type { CommandSpec, EngineInterface, PluginOptions, Register, Timer } from 'claude-code'
 
 import {
   cleanContinuation,
@@ -212,6 +212,20 @@ function notify($: EngineInterface, text: string) {
   }
 }
 
+/**
+ * The one debug-log line each /relay run ends with (grep `run done`): the phase
+ * it reached (saving: before the save turn ended; continuing: after) and how it
+ * ended (delivered: the continuation went into the box or was submitted;
+ * stopped: a failure, with its message logged next; cancelled: /relay cancel).
+ */
+function logRunDone($: EngineInterface, phase: string, outcome: 'delivered' | 'stopped' | 'cancelled') {
+  try {
+    $.ui.log(`run done phase=${phase} outcome=${outcome} deliver=${config.deliver}`, { to: 'debug' })
+  } catch {
+    // Best effort.
+  }
+}
+
 /** Ends run `runId` if it is still the live one, and says why; never throws. */
 async function finish($: EngineInterface, runId: number, message: string | null, keepHold = false) {
   try {
@@ -220,6 +234,7 @@ async function finish($: EngineInterface, runId: number, message: string | null,
     await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId } : cur))
     await forgetRun($)
     $.ui.status(undefined)
+    logRunDone($, run.phase, message === null ? 'delivered' : 'stopped')
     if (message) $.ui.log(`${message}`)
     // A failure leaves no continuation prompt to wait for, unless it's already in the box.
     if (message && !keepHold && filledEarlyRunId !== runId) await releaseToSession($)
@@ -421,6 +436,36 @@ async function submitSave($: EngineInterface, runId: number, save: string) {
   })
 }
 
+/**
+ * Registration never throws out of session.start: the engine refuses a name
+ * it reserves as a built-in, and refuses every register when no session is
+ * bound, and an uncaught throw there skips the rest of the hook. Headless
+ * sessions (`claude -p`, the SDK) have no prompt to type a command at, so the
+ * command is skipped there. Each failure is one debug-log line (the engine
+ * prefixes the plugin name).
+ */
+async function registerCommand($: EngineInterface, isInteractive: boolean, spec: CommandSpec): Promise<boolean> {
+  if (!isInteractive) {
+    startupLog($, `/${spec.name} not registered: headless session`)
+    return false
+  }
+  try {
+    await $.command.register(spec)
+    return true
+  } catch (err) {
+    startupLog($, `/${spec.name} not registered: ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
+}
+
+function startupLog($: EngineInterface, text: string) {
+  try {
+    $.ui.log(text)
+  } catch {
+    // reporting is best effort
+  }
+}
+
 export const register: Register = (on, options) => {
   config = configFrom(options)
   timer = null
@@ -429,7 +474,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     isInteractive = e.isInteractive
-    await $.command.register({
+    await registerCommand($, e.isInteractive, {
       name: 'relay',
       description: 'Save state to durable notes, draft a continuation prompt, compact, and queue the prompt',
       argumentHint: '[focus | status | cancel | paste]',
@@ -556,6 +601,7 @@ export const register: Register = (on, options) => {
           await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1 }))
           await forgetRun($)
           $.ui.status(undefined)
+          logRunDone($, run.phase, 'cancelled')
         }
         const released = await releaseToSession($)
         const note = released ? ` Released ${released} held message${released === 1 ? '' : 's'}.` : ''
