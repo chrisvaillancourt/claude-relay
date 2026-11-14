@@ -31,7 +31,7 @@ relay declines the call, and says why, when:
 - a handoff is already saved for this turn;
 - you cancelled this turn's `/relay`, or typed a prompt over the running turn: your prompt runs next, and a handoff now would compact over it. The block ends when the next turn starts.
 
-Headless sessions (`claude -p`, SDK) register the tool but not `/relay`. There relay compacts through `/compact` as the turn ends and sends the continuation. This path follows what the checkpoint mod does on Claude Code 2.1.312 and is covered by `claude plugin test`, not yet by a live headless run. `/compact` run this way doesn't report a skip (a `PreCompact` hook's veto), so relay checks that the context shrank and stops the run if it didn't.
+Headless sessions (`claude -p`, SDK) register the tool but not `/relay`. There relay compacts through `/compact` as the turn ends and sends the continuation. This path follows what the checkpoint mod does on Claude Code 2.1.312 and is covered by `claude plugin test`, not yet by a live headless run. `/compact` run this way doesn't report a skip (a `PreCompact` hook's veto), so relay checks that the context shrank and stops the run if it didn't. If the context size isn't available beforehand, relay doesn't compact at all and tells the model so.
 
 ## Nothing runs between the handoff and the continuation
 

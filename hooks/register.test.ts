@@ -1370,6 +1370,30 @@ describe('races and recoveries', () => {
     expect(w.submits[0]?.text).toContain('the context did not shrink')
   })
 
+  test('headless: with the context size unknown, relay does not compact, since it could not tell a veto from a compaction', async ($, on) => {
+    const w = world(on, { tokens: null, compactVetoed: true })
+    await start($, false)
+    await agentArmed($)
+    await turnEnd($, 'work-1')
+    expect(w.calls).toEqual(['submit'])
+    expect(w.submits[0]?.text).toMatch(/NOT compacted/)
+    expect(w.submits[0]?.text).toContain('context size is unavailable')
+  })
+
+  test('cancel after a skipped compaction left the prompt in the box: the hand-back carries the waiting notice', async ($, on) => {
+    const w = world(on, { compactSkip: 'blocked by a PreCompact hook' })
+    await start($)
+    await saveTurnArmed($, w)
+    await teammate($, 'held report')
+    await turnEnd($, 'save-1')
+    await w.clock.advance(SEC)
+    expect(notCompacted(w.submits.map(s => s.text))).toBe(false)
+    await relay($, 'cancel')
+    await w.clock.advance(SEC)
+    expect(w.submits.at(-1)?.text).toContain('held report')
+    expect(w.submits.at(-1)?.text).toMatch(/NOT compacted/)
+  })
+
   test('several deliveries held at once are all in the store', async ($, on) => {
     const w = world(on)
     await start($)

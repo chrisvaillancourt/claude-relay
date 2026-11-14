@@ -215,13 +215,17 @@ async function releaseToSession($: EngineInterface): Promise<number> {
  * Ends the hold and hands back what it held, with `notice` for the model:
  * in relay's own message when `submit` is set or there are deliveries to
  * hand back (the turn that message starts must not run believing in a
- * compaction), else with the person's next prompt.
+ * compaction), else with the person's next prompt. A notice still waiting
+ * for the person's prompt (an earlier stop that kept the hold) goes the same
+ * way when the caller has none.
  */
 async function handBack($: EngineInterface, notice: string | null, submit: boolean): Promise<number> {
+  const waiting = (await read($, holdAtom)).notice ?? null
   const held = await release($)
   const viaSubmit = submit || held.length > 0
-  if (notice && !viaSubmit) await update($, holdAtom, cur => ({ ...cur, notice }))
-  await submitLater($, viaSubmit ? notice : null, held)
+  const text = notice ?? waiting
+  if (viaSubmit ? waiting : text) await update($, holdAtom, cur => ({ ...cur, notice: viaSubmit ? null : text }))
+  await submitLater($, viaSubmit ? text : null, held)
   return held.length
 }
 
@@ -411,10 +415,13 @@ async function compactOnce($: EngineInterface, instructions: string): Promise<{ 
     return r.skip === undefined ? {} : { skip: r.skip }
   }
   // /compact run this way reports no skip (a PreCompact hook's veto), so the context's size has to say.
+  // Without a size to compare with, a veto would pass for a compaction, so relay doesn't compact at all.
   const before = await contextTokens($)
+  if (before === null) return { skip: 'the context size is unavailable, so a compaction could not be confirmed' }
   await $.command.run({ command: 'compact', args: instructions })
+  // A compaction clears the size until the next response, so none afterwards is not a veto.
   const after = await contextTokens($)
-  return before !== null && after !== null && after >= before ? { skip: 'the context did not shrink' } : {}
+  return after !== null && after >= before ? { skip: 'the context did not shrink' } : {}
 }
 
 /** Runs `step` once the current hook has returned (a timer), or at once where timers don't outlive the turn. */
