@@ -575,9 +575,10 @@ async function deliver($: EngineInterface, runId: number) {
   const text = await promptText($, run)
   if (!text) {
     await finish($, runId, `compacted, but the continuation prompt was lost. Continue from @${run.notePath}.`, { keepHold: true, isCompacted: true })
-    // Nobody may be there to send it for the agent's run.
+    // Nobody may be there to send it for the agent's run. The hold ends here, not at the
+    // message's turn: if the message were refused, a hold left on would never end.
     if (run.source === 'agent') {
-      await submitLater($, `relay compacted this conversation, but its continuation prompt was lost. Read ${run.notePath} and continue from it.`, await takeHeld($))
+      await submitLater($, `relay compacted this conversation, but its continuation prompt was lost. Read ${run.notePath} and continue from it.`, await release($))
     }
     return
   }
@@ -588,7 +589,8 @@ async function deliver($: EngineInterface, runId: number) {
     const body = held.length ? `${forSubmit(text)}\n\n${heldNotice(held)}` : forSubmit(text)
     let refused: string | null = null
     try {
-      // Resolves once the prompt entered and its turn started, or was queued.
+      // By the types, resolves once the prompt entered and its turn started, or was queued; one
+      // queued 33 minutes seemed to resolve only at its turn. Nothing here depends on which.
       const r = await $.prompt.submit({ text: body, asUser: true })
       if (r.drop !== undefined) refused = r.drop
     } catch (err) {
