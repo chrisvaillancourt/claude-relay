@@ -8,7 +8,6 @@ import {
   heldNotice,
   holdAppend,
   isCanceled,
-  isContinuationFor,
   isHeldOrigin,
   isPersonOrigin,
   isRunRecord,
@@ -281,13 +280,6 @@ describe('run records', () => {
     expect(notCompactedNotice('x', null)).not.toMatch(/handoff note, if/)
   })
 
-  test('a continuation relay submitted is known by its lead and its note, and nothing else is', async () => {
-    const sent = forSubmit(composeContinuation({ continuation: 'Resume.', files: [] }, NOTE))
-    expect(isContinuationFor(sent, NOTE)).toBe(true)
-    expect(isContinuationFor(sent, NOTE.replace('.md', '-2.md'))).toBe(false)
-    expect(isContinuationFor(`what does @${NOTE} say?`, NOTE)).toBe(false)
-  })
-
   test('typed-over prompts stay unseen until a row attached to the turn carries their text', async () => {
     const long = `${'x'.repeat(200)} tail`
     const unseen = withUnseen(withUnseen([], '  stop and do X  '), long)
@@ -295,8 +287,9 @@ describe('run records', () => {
     expect(stillUnseen(unseen, [{ type: 'text', text: 'a task finished' }])).toEqual(unseen)
     expect(stillUnseen(unseen, [{ type: 'text', text: 'The user said:\nstop and do X' }])).toEqual(['x'.repeat(80)])
     expect(stillUnseen(unseen, [{ type: 'image' }, { type: 'text', text: long }])).toEqual(['stop and do X'])
-    // a prompt with no text (an image alone) is taken to be in any attached row
-    expect(stillUnseen(withUnseen([], ''), [{ type: 'text', text: 'anything' }])).toEqual([])
+    // a prompt too short to be known by its text is in almost any row, so no row clears it
+    expect(stillUnseen(withUnseen([], 'ok'), [{ type: 'text', text: 'the build looks ok' }])).toEqual(['ok'])
+    expect(stillUnseen(withUnseen([], ''), [{ type: 'text', text: 'anything' }])).toEqual([''])
     expect(withUnseen(Array.from({ length: 30 }, (_, i) => `p${i}`), 'last').length).toBe(20)
   })
 

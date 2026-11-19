@@ -1584,20 +1584,13 @@ describe("a prompt typed over the turn blocks a handoff only until the model has
     expect(await handoff($)).toMatch(/may not have read/)
   })
 
-  test('a prompt the person asked to wait its turn does not block: it runs after the turn, and the compaction waits for it', async ($, on) => {
-    const w = world(on)
+  test('a prompt too short to be told from other text is not taken as read from a row that happens to contain it', async ($, on) => {
+    world(on)
     await start($)
     await turnStart($, 'work-1')
-    await $.prompt.submit({ text: 'next, look at Y', origin: { kind: 'composer' }, wait: true, turnId: 'work-1' })
-    expect(await handoff($)).toMatch(/Handoff saved/)
-    await turnEnd($, 'work-1')
-    await turnStart($, 'person-1', 'next, look at Y')
-    await w.clock.advance(SEC)
-    expect(w.calls).toEqual(['submit'])
-    await turnEnd($, 'person-1')
-    await w.clock.advance(SEC)
-    expect(w.calls).toEqual(['submit', 'compact', 'submit'])
-    expect(w.submits.at(-1)?.text).toContain(STALE_NOTE)
+    await arrive($, 'ok', 'composer', 'work-1')
+    await attach($, 'the build looks ok')
+    expect(await handoff($)).toMatch(/may not have read/)
   })
 })
 
@@ -1637,6 +1630,57 @@ describe('a handoff call while an earlier run is still going', () => {
     return { w, queue }
   }
   const NOTE_2 = '/tmp/T/claude-relay/my-proj-20261007T150001Z.md'
+
+  test('what the replaced prompt carried from the hold rides with the newer one, and a turn that joins both prompts is not cut', async ($, on) => {
+    const gate = deferred<void>()
+    const queue = deferred<void>()
+    const w = world(on, { compactGate: gate.p, submitGate: text => (text.includes(PROMPT) ? queue.p : undefined) })
+    await start($)
+    await agentArmed($)
+    await turnEnd($, 'work-1')
+    await w.clock.advance(0)
+    await arrive($, 'job 7 finished', 'task-notification')
+    gate.resolve()
+    await w.clock.advance(SEC)
+    const first = w.submits.at(-1)?.text ?? ''
+    expect(first).toContain('job 7 finished')
+
+    await turnStart($, 'person-1', 'one more thing first')
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1')
+    await w.clock.advance(SEC)
+    const second = w.submits.at(-1)?.text ?? ''
+    expect(second).toContain(supersededLine(NOTE))
+    expect(second).toContain('job 7 finished')
+
+    await turnStart($, 'both-1', `${first}\n\n${second}`)
+    await w.clock.advance(SEC)
+    expect(w.aborts).toEqual([])
+    queue.resolve()
+  })
+
+  test('a newer prompt that lists the replaced note among its files is not cut', async ($, on) => {
+    const { w } = await queuedBehindATurn($, on)
+    await handoff($, { ...HANDOFF_2, files: [NOTE] })
+    await turnEnd($, 'person-1')
+    await w.clock.advance(SEC)
+    const second = w.submits.at(-1)?.text ?? ''
+    expect(second).toContain(`@${NOTE}`)
+    await turnStart($, 'cont-2', second)
+    await w.clock.advance(SEC)
+    expect(w.aborts).toEqual([])
+  })
+
+  test('a turn that could not be cut short ran after the note, and the newer prompt says so', async ($, on) => {
+    const { w } = await queuedBehindATurn($, on, { abortFails: true })
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1')
+    await turnStart($, 'old-1', forSubmit(PROMPT))
+    await w.clock.advance(SEC)
+    await turnEnd($, 'old-1')
+    await w.clock.advance(SEC)
+    expect(w.submits.at(-1)?.text).toContain(STALE_NOTE)
+  })
 
   test('with its continuation still queued, a new handoff starts a run of its own, and the queued prompt’s turn is cut short', async ($, on) => {
     const { w, queue } = await queuedBehindATurn($, on)

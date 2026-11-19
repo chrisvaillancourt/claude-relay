@@ -166,7 +166,7 @@ export const QUEUED_NOTE =
 
 /** Added to a continuation whose run replaced one with a prompt still queued, which relay then cut short. */
 export function supersededLine(oldNotePath: string): string {
-  return `An earlier continuation prompt, the one naming ${oldNotePath}, was queued before this handoff and is out of date. relay stopped its turn; ignore it.`
+  return `An earlier continuation prompt, the one naming ${oldNotePath}, was queued before this handoff and is out of date: ignore it. This prompt replaces it, and repeats below any messages it carried.`
 }
 
 export function belowMinText(tokens: number, minTokens: number): string {
@@ -316,16 +316,13 @@ export function forSubmit(text: string): string {
   return `${SUBMIT_LEAD}\n\n${text}`
 }
 
-/** How every continuation relay submits begins; `isContinuationFor` knows one by it. */
+/** How every continuation relay submits begins. */
 export const SUBMIT_LEAD =
   'Read every file below whose path is prefixed with @ before doing anything else (they are not attached automatically), then continue.'
 
-/** Whether a turn's prompt is the continuation relay submitted for the note at `notePath`. */
-export function isContinuationFor(text: string, notePath: string): boolean {
-  return text.startsWith(SUBMIT_LEAD) && text.includes(`@${notePath}`)
-}
-
 const UNSEEN_KEY_LENGTH = 80
+/** A shorter prompt ("ok", "no") is in almost any row, so no row is taken to carry it. */
+const MIN_UNSEEN_KEY_LENGTH = 12
 const MAX_UNSEEN = 20
 
 /** What a prompt typed over a turn is known by until the model has read it: the start of its text. */
@@ -341,11 +338,11 @@ export function withUnseen(unseen: readonly string[], text: string): string[] {
 /**
  * The typed-over prompts the model still hasn't read, after a queued prompt
  * was attached to the running turn with `content` as its rendering. A prompt
- * with no text (an image alone) is taken to be in any such attachment.
+ * too short to be known by its text stays until a refused call or the next turn.
  */
 export function stillUnseen(unseen: readonly string[], content: readonly { type?: unknown; text?: unknown }[]): string[] {
   const text = content.map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('\n')
-  return unseen.filter(key => key !== '' && !text.includes(key))
+  return unseen.filter(key => key.length < MIN_UNSEEN_KEY_LENGTH || !text.includes(key))
 }
 
 /**
