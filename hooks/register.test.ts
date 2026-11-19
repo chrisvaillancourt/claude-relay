@@ -1659,6 +1659,43 @@ describe('a handoff call while an earlier run is still going', () => {
     queue.resolve()
   })
 
+  /** R1's queued prompt carries a held delivery; R2 replaces it, and R1's turn starts first and is cut short. */
+  const cutWhileCarrying = async ($: any, on: On) => {
+    const gate = deferred<void>()
+    const queue = deferred<void>()
+    const w = world(on, { compactGate: gate.p, submitGate: text => (text.includes(PROMPT) ? queue.p : undefined) })
+    await start($)
+    await agentArmed($)
+    await turnEnd($, 'work-1')
+    await w.clock.advance(0)
+    await arrive($, 'job 7 finished', 'task-notification')
+    gate.resolve()
+    await w.clock.advance(SEC)
+    const first = w.submits.at(-1)?.text ?? ''
+    await turnStart($, 'person-1', 'one more thing first')
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1')
+    await turnStart($, 'old-1', first)
+    await w.clock.advance(0)
+    expect(w.aborts).toEqual(['old-1'])
+    return { w, sentBefore: w.submits.length }
+  }
+
+  test('a newer run cancelled after the replaced prompt was cut short hands back what that prompt carried', async ($, on) => {
+    const { w, sentBefore } = await cutWhileCarrying($, on)
+    await relay($, 'cancel')
+    await w.clock.advance(SEC)
+    expect(w.submits.slice(sentBefore).some(x => x.origin === 'plugin' && x.text.includes('job 7 finished'))).toBe(true)
+  })
+
+  test('a newer run that stops after the replaced prompt was cut short hands back what that prompt carried', async ($, on) => {
+    const { w, sentBefore } = await cutWhileCarrying($, on)
+    await arrive($, 'stop, look at this', 'composer')
+    await w.clock.advance(SEC)
+    expect(w.compacts.length).toBe(1)
+    expect(w.submits.slice(sentBefore).some(x => x.origin === 'plugin' && x.text.includes('job 7 finished'))).toBe(true)
+  })
+
   test('a newer prompt that lists the replaced note among its files is not cut', async ($, on) => {
     const { w } = await queuedBehindATurn($, on)
     await handoff($, { ...HANDOFF_2, files: [NOTE] })

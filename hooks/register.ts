@@ -398,11 +398,7 @@ async function finish($: EngineInterface, runId: number, message: string | null,
     await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId, isBlocked: options.block ?? cur.isBlocked, unseen: cur.unseen } : cur))
     await forgetRun($)
     if (waitingRunId === runId) waitingRunId = null
-    // A run that stops sends no prompt to take the queued one's place, so that one runs after all.
-    if (message !== null && replaced?.runId === runId) {
-      staleBodies.delete(replaced.body)
-      replaced = null
-    }
+    if (message !== null) await dropReplaced($, runId)
     $.ui.status(undefined)
     logRunDone($, run, message === null ? 'delivered' : 'stopped')
     if (message === null) return
@@ -823,6 +819,19 @@ function debugLog($: EngineInterface, text: string) {
   }
 }
 
+/**
+ * Run `runId` ends without sending its prompt, so no prompt takes the place
+ * of the one it replaced. Still queued, that one is left to run, carrying
+ * what it carried. Already cut short or refused, it will never be read, so
+ * the held deliveries it carried go back to the session here.
+ */
+async function dropReplaced($: EngineInterface, runId: number) {
+  if (replaced?.runId !== runId) return
+  const { body, held } = replaced
+  replaced = null
+  if (!staleBodies.delete(body)) await submitLater($, null, held)
+}
+
 /** Ends the turn of a replaced run's prompt. From a timer, like a submit; a refusal leaves the turn to run. */
 function cutTurn($: EngineInterface, turnId: string) {
   const cut = () =>
@@ -1140,9 +1149,8 @@ export const register: Register = (on, options) => {
         if (run.phase !== 'idle') {
           cancelTimer()
           waitingRunId = null
-          // With no newer prompt coming, a replaced run's queued prompt is left to run.
+          await dropReplaced($, run.runId)
           staleBodies.clear()
-          replaced = null
           await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1, isBlocked: true }))
           await forgetRun($)
           $.ui.status(undefined)
