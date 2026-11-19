@@ -70,6 +70,13 @@ export type Run = {
    * in front of the model would otherwise start a run of its own.
    */
   isBlocked: boolean
+  /**
+   * Prompts the person typed over the running turn that the model may not
+   * have read yet (the start of each one's text). A handoff call is refused
+   * while there is one: its note would be written without it. Emptied as each
+   * is attached to the turn, at a refused call, and at the next turn.
+   */
+  unseen: string[]
 }
 
 /**

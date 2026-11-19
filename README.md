@@ -21,7 +21,7 @@ No model call is made besides the compaction itself: the continuation prompt is 
 
 ## When the agent hands off by itself
 
-The tool is in the model's tool list with a description of when to use it: at a logical stopping point, when the context is large and work remains; not when the task is nearly done or while waiting on you. Before calling, the agent updates the docs, notes and tickets the session made stale, so the note links to them instead of repeating them.
+The tool is in the model's tool list with a description of when to use it: at a logical stopping point, when the context is large and work remains; not when the task is nearly done or while waiting on you. Before calling, the agent updates the docs, notes and tickets the session made stale and commits what it means to commit, so the note links to them instead of repeating them. The tool's answer says the note is final and to make no more tool calls in the turn: work done after the call is in no note.
 
 relay declines the call, and says why, when:
 
@@ -29,7 +29,13 @@ relay declines the call, and says why, when:
 - a subagent or teammate calls it (only the main conversation is compacted);
 - `note` or `continuation` is missing;
 - a handoff is already saved for this turn;
-- you cancelled this turn's `/relay`, or typed a prompt over the running turn: your prompt runs next, and a handoff now would compact over it. The block ends when the next turn starts.
+- you cancelled this turn's `/relay` (until the next turn starts);
+- you typed a prompt over the running turn and the model hasn't read it yet: the note would be written without it. Claude Code attaches such a prompt to the turn at its next step, and from then on a handoff goes through, so "finish up, then hand off" typed mid-turn works. If relay never sees the prompt attached, it declines one call and accepts the next, since the prompt reaches the model with that answer. A prompt you asked to wait its turn (`ctrl+x enter`) doesn't block: it runs after the turn, and the compaction waits for it.
+
+A call in a later turn, while an earlier handoff is unfinished, replaces that handoff:
+
+- **Before the compaction** (a message queued before the handoff started a turn, and relay is waiting for it): the new note and prompt take the place of the old ones, and the run goes on.
+- **After the compaction, with the continuation prompt still in the queue** (a turn you started is running ahead of it): relay starts a new run. A queued prompt can't be withdrawn, so when the old one's turn starts relay ends it at once (`$.turn.abort`), and the new continuation says to ignore it. If the new run stops before delivering, or Claude Code refuses to end the turn, the old prompt runs.
 
 Headless sessions (`claude -p`, SDK) register the tool but not `/relay`. There relay compacts through `/compact` as the turn ends and sends the continuation. This path follows what the checkpoint mod does on Claude Code 2.1.312 and is covered by `claude plugin test`, not yet by a live headless run. `/compact` run this way doesn't report a skip (a `PreCompact` hook's veto), so relay checks that the context shrank and stops the run if it didn't. If the context size isn't available beforehand, relay doesn't compact at all and tells the model so.
 
@@ -117,6 +123,8 @@ grep -h 'relay\] .*run done' ~/.claude/debug/*.txt
 # [relay] $.ui.log: run done phase=saving|armed|continuing outcome=delivered|stopped|cancelled deliver=fill|submit source=person|agent
 ```
 
+A delivery relay holds logs `held a <kind> delivery (run <phase>, compaction <not started|pending|done>)`, and a replaced handoff logs `handoff replaced…` or `run <n> replaced…`.
+
 `phase=saving` ended before the tool call; `armed` after it, before the turn ended; `continuing` got to the compaction. A `stopped` line is followed by the reason. A compaction that waited for a turn logs `compaction deferred (n)`. A refused registration logs `/relay not registered: …` or `tool handoff not registered: …` instead of stopping the session start.
 
 ## What has been checked live
@@ -126,7 +134,7 @@ grep -h 'relay\] .*run done' ~/.claude/debug/*.txt
 - Claude Code 2.1.325, 2026-11-14, with an observer mod and a live teammate: a teammate's message and idle notice raise `session.receive` with origin `{kind: "peer", teammate, isVerified: true}` and no `prompt.submit`; one that arrives mid-turn starts a turn of its own when the running turn ends.
 - Claude Code 2.1.325, 2026-11-14, interactive, a handoff the agent started: the tool call saved the note and the prompt, the conversation was compacted when the turn ended, and the continuation prompt arrived as a submitted message with the note listed first. A background job that finished during the compaction didn't start a turn; its notification arrived inside the continuation prompt. The debug log read `run done phase=continuing outcome=delivered deliver=submit source=agent`.
 
-Not yet run live: the headless path, and holding a teammate's message at `session.receive` (that `{consumed}` there keeps it out of the queue is from the API types). Everything else here is covered by `claude plugin test`.
+Not yet run live: the headless path; holding a teammate's message at `session.receive` (that `{consumed}` there keeps it out of the queue is from the API types); ending a replaced prompt's turn with `$.turn.abort`; and reading a typed-over prompt's attachment at `session.append` (the `queued_command` row is from transcripts, the hook from the API types). Everything else here is covered by `claude plugin test`.
 
 ## Install
 

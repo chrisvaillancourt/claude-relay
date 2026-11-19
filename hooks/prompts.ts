@@ -26,8 +26,8 @@ export const TOOL_DESCRIPTION =
   'Hand the work off to yourself across a compaction, so a long conversation does not carry detail it no longer needs. ' +
   'relay saves your handoff note to a file, compacts the conversation when this turn ends, and then continues from the continuation prompt you give now. ' +
   'Call it at a logical stopping point when the context is large and work remains, or when a [relay] save prompt asks. ' +
-  'Before calling, update the docs, notes and tickets this session made stale, so the note can link to them instead of repeating them. ' +
-  "After the call, end your turn with a one-line status and don't start new work in this turn. " +
+  'Before calling, update the docs, notes and tickets this session made stale and commit what you mean to commit, so the note can link to them instead of repeating them. ' +
+  'The note is final once you call: after the call, end your turn with a one-line status, make no more tool calls and start no new work in this turn. ' +
   'The same session and process continue after the compaction, so subagents and background jobs keep running and still report. ' +
   "Don't call it on your own when the task is nearly done or while you are waiting on the user."
 
@@ -130,13 +130,43 @@ export function compactInstructionsFor(base: string, notePath: string): string {
   )
 }
 
+/** How every accepted handoff tells the model to stop: work after the call is in no note. */
+const END_TURN =
+  'The note is final: nothing you do after this call is in it. End your turn now with a one-line status; make no more tool calls and start no new work in this turn.'
+
 /** The tool's answer once the note and prompt are saved. */
 export function acceptedText(notePath: string, deliver: Deliver): string {
   const then = deliver === 'submit' ? 'sends the continuation prompt' : "puts the continuation prompt in the person's prompt box"
   return (
-    `Handoff saved to ${notePath}. End your turn now with a one-line status, and don't start new work in this turn. ` +
+    `Handoff saved to ${notePath}. ${END_TURN} ` +
     `relay compacts the conversation when this turn ends, then ${then}.`
   )
+}
+
+/** The answer when the call replaced the note of a run still waiting to compact: this turn ran after the first note. */
+export function replacedText(notePath: string, deliver: Deliver): string {
+  const then = deliver === 'submit' ? 'sends the continuation prompt' : "puts the continuation prompt in the person's prompt box"
+  return (
+    `Handoff saved to ${notePath}, in place of the one saved before this turn, which had not been compacted yet. ${END_TURN} ` +
+    `relay compacts the conversation when this turn ends, then ${then}.`
+  )
+}
+
+/**
+ * The answer when the person typed a prompt over the turn and the model may
+ * not have read it yet: a handoff now would be written without it.
+ */
+export const UNSEEN_TEXT =
+  'Nothing was saved: the person sent a prompt during this turn that you may not have read when you wrote this handoff. ' +
+  'It reaches you with this result or right after it. Act on it first; then, if handing off is still right, call the tool again with a note that covers it.'
+
+/** Added to an answer that starts no run while an earlier run's continuation prompt is still queued. */
+export const QUEUED_NOTE =
+  "An earlier handoff's continuation prompt is still queued and arrives when this turn ends. It was written before this turn's work: where it differs from what you have done since, it is out of date."
+
+/** Added to a continuation whose run replaced one with a prompt still queued, which relay then cut short. */
+export function supersededLine(oldNotePath: string): string {
+  return `An earlier continuation prompt, the one naming ${oldNotePath}, was queued before this handoff and is out of date. relay stopped its turn; ignore it.`
 }
 
 export function belowMinText(tokens: number, minTokens: number): string {
@@ -283,7 +313,39 @@ export function heldNotice(items: readonly string[]): string {
 
 /** A plugin's submitted prompt doesn't expand `@` mentions, so the model is told to read them. */
 export function forSubmit(text: string): string {
-  return `Read every file below whose path is prefixed with @ before doing anything else (they are not attached automatically), then continue.\n\n${text}`
+  return `${SUBMIT_LEAD}\n\n${text}`
+}
+
+/** How every continuation relay submits begins; `isContinuationFor` knows one by it. */
+export const SUBMIT_LEAD =
+  'Read every file below whose path is prefixed with @ before doing anything else (they are not attached automatically), then continue.'
+
+/** Whether a turn's prompt is the continuation relay submitted for the note at `notePath`. */
+export function isContinuationFor(text: string, notePath: string): boolean {
+  return text.startsWith(SUBMIT_LEAD) && text.includes(`@${notePath}`)
+}
+
+const UNSEEN_KEY_LENGTH = 80
+const MAX_UNSEEN = 20
+
+/** What a prompt typed over a turn is known by until the model has read it: the start of its text. */
+export function unseenKey(text: string): string {
+  return text.trim().slice(0, UNSEEN_KEY_LENGTH)
+}
+
+/** `unseen` with a prompt typed over the running turn added. */
+export function withUnseen(unseen: readonly string[], text: string): string[] {
+  return [...unseen, unseenKey(text)].slice(-MAX_UNSEEN)
+}
+
+/**
+ * The typed-over prompts the model still hasn't read, after a queued prompt
+ * was attached to the running turn with `content` as its rendering. A prompt
+ * with no text (an image alone) is taken to be in any such attachment.
+ */
+export function stillUnseen(unseen: readonly string[], content: readonly { type?: unknown; text?: unknown }[]): string[] {
+  const text = content.map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('\n')
+  return unseen.filter(key => key !== '' && !text.includes(key))
 }
 
 /**

@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On, SessionCompactResult } from 'claude-code'
 
-import { composeContinuation, forSubmit, promptPathFor, SAVE_MARKER, STALE_NOTE, TOOL } from './prompts'
+import { composeContinuation, forSubmit, promptPathFor, SAVE_MARKER, STALE_NOTE, supersededLine, TOOL } from './prompts'
 
 const T0 = Date.UTC(2026, 9, 7, 15, 0)
 const SEC = 1000
@@ -51,6 +51,10 @@ type WorldOpts = {
   armedRecordGate?: Promise<void>
   /** Holds every notify open until the test resolves it (a slow notification channel). */
   notifyGate?: Promise<void>
+  /** Holds a plugin's submit open while it sits in the queue; undefined lets it through. */
+  submitGate?: (text: string) => Promise<void> | undefined
+  /** Makes the engine refuse to end a turn. */
+  abortFails?: boolean
 }
 
 /** The engine beneath the plugin, recording what the plugin asked of it, in order. */
@@ -120,11 +124,20 @@ const world = (on: On, opts: WorldOpts = {}) => {
       context: e.context,
     })
     if (opts.throwSubmit?.(e.text)) throw new Error('submit failed')
+    const queued = e.origin.kind === 'plugin' ? opts.submitGate?.(e.text) : undefined
+    if (queued) return queued.then(() => ({ text: e.text, origin: e.origin }))
     const drop = opts.dropSubmit?.(e.text)
     if (drop !== undefined) return { drop }
     return { text: e.text, origin: e.origin }
   })
   on('prompt.read', () => ({ value: { text: box.text, cursor: 0 } }))
+  on('session.append', ($, e, next) => next(e))
+  const aborts: string[] = []
+  on('turn.abort', ($, e) => {
+    if (opts.abortFails) throw new Error('not the running turn')
+    aborts.push(e.turnId)
+    return { value: undefined }
+  })
   let compactGate = opts.compactGate
   const runCompaction = async (instructions: string | undefined): Promise<SessionCompactResult> => {
     compacts.push(instructions)
@@ -179,7 +192,7 @@ const world = (on: On, opts: WorldOpts = {}) => {
     return { value: { isSent: false as const, reason: 'no-channel' as const } }
   })
 
-  return { clock, calls, submits, compacts, fills, copies, logs, toasts, notifies, writes, received, box, store }
+  return { clock, calls, submits, compacts, fills, copies, logs, toasts, notifies, writes, received, box, store, aborts }
 }
 
 type World = ReturnType<typeof world>
@@ -204,6 +217,16 @@ const handoff = async ($: any, input: Record<string, unknown> = HANDOFF, agentId
   (await $.tool.call({ tool: TOOL, tool_use_id: 'tu1', ...input, ...(agentId ? { agentId } : {}) })).result
 
 const turnStart = ($: any, turnId: string, text = 'work') => $.turn.start({ text, turnId })
+
+/** A prompt queued over the running turn being attached to it, where the model's next step reads it. */
+const attach = ($: any, text: string, extra: Record<string, unknown> = {}) =>
+  $.session.append({
+    door: 'attachment',
+    origin: { kind: 'composer' },
+    uuid: 'row-1',
+    message: { type: 'attachment', name: 'queued_command', content: [{ type: 'text', text: `The user sent a new message while you were working:\n${text}` }] },
+    ...extra,
+  })
 
 const turnEnd = ($: any, turnId: string, reason: 'answer' | 'aborted' = 'answer') =>
   $.turn.complete({ answer: 'Saved.', durationMs: 30 * SEC, isAborted: reason === 'aborted', turnId, reason })
@@ -1077,6 +1100,8 @@ describe('deliveries wait for the continuation prompt', () => {
     // dequeued as the session went idle after the compaction, before the continuation's turn started
     expect((await arrive($, 'hand-back queued during the compaction', 'peer')).drop).toMatch(/holding/)
     expect(w.store.get('held/sid-1')).toEqual(['hand-back queued during the compaction'])
+    // greppable in the debug log: what was held, and whether the compaction had finished
+    expect(w.logs).toContain('held a peer delivery (run idle, compaction done)')
 
     await turnStart($, 'cont-1', sent)
     await w.clock.advance(0)
@@ -1331,7 +1356,7 @@ describe('races and recoveries', () => {
     await start($)
     await turnStart($, 'work-1')
     await arrive($, 'stop and do X instead', 'composer', 'work-1')
-    expect(await handoff($)).toMatch(/No handoff will run/)
+    expect(await handoff($)).toMatch(/may not have read/)
     await turnEnd($, 'work-1')
     await turnStart($, 'person-1', 'stop and do X instead')
     await w.clock.advance(5 * SEC)
@@ -1397,7 +1422,7 @@ describe('races and recoveries', () => {
     await w.clock.advance(0)
     await arrive($, 'stop and do X instead', 'composer', 'work-1')
     gate.resolve()
-    expect(await answering).toMatch(/No handoff will run/)
+    expect(await answering).toMatch(/may not have read/)
     await turnEnd($, 'work-1')
     await w.clock.advance(5 * SEC)
     expect(w.compacts.length).toBe(0)
@@ -1519,6 +1544,183 @@ describe('races and recoveries', () => {
     await start($)
     await arrive($, 'carry on', 'composer')
     expect(notCompacted(w.submits.at(-1)?.context ?? [])).toBe(true)
+  })
+})
+
+describe("a prompt typed over the turn blocks a handoff only until the model has read it", () => {
+  test('once the prompt is attached to the turn, the handoff the person asked for goes through', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turnStart($, 'work-1')
+    await arrive($, 'finish up, then hand off and compact before new work', 'composer', 'work-1')
+    // another row attached to the turn says nothing about the prompt
+    await attach($, 'a background task finished')
+    expect(await handoff($)).toMatch(/may not have read/)
+
+    await arrive($, 'and commit first', 'composer', 'work-1')
+    await attach($, 'and commit first')
+    expect(await handoff($)).toMatch(/Handoff saved/)
+    await turnEnd($, 'work-1')
+    await w.clock.advance(SEC)
+    // the person's two prompts, then relay's compaction and continuation
+    expect(w.calls).toEqual(['submit', 'submit', 'compact', 'submit'])
+  })
+
+  test('a refused call is the last one refused for that prompt, which the model reads with the refusal', async ($, on) => {
+    world(on)
+    await start($)
+    await turnStart($, 'work-1')
+    await arrive($, 'also update the docs', 'composer', 'work-1')
+    expect(await handoff($)).toMatch(/may not have read/)
+    expect(await handoff($)).toMatch(/Handoff saved/)
+  })
+
+  test("a subagent's attached row does not count as the main conversation reading the prompt", async ($, on) => {
+    world(on)
+    await start($)
+    await turnStart($, 'work-1')
+    await arrive($, 'also update the docs', 'composer', 'work-1')
+    await attach($, 'also update the docs', { agentId: 'agent-1' })
+    expect(await handoff($)).toMatch(/may not have read/)
+  })
+
+  test('a prompt the person asked to wait its turn does not block: it runs after the turn, and the compaction waits for it', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await turnStart($, 'work-1')
+    await $.prompt.submit({ text: 'next, look at Y', origin: { kind: 'composer' }, wait: true, turnId: 'work-1' })
+    expect(await handoff($)).toMatch(/Handoff saved/)
+    await turnEnd($, 'work-1')
+    await turnStart($, 'person-1', 'next, look at Y')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['submit'])
+    await turnEnd($, 'person-1')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['submit', 'compact', 'submit'])
+    expect(w.submits.at(-1)?.text).toContain(STALE_NOTE)
+  })
+})
+
+describe('a handoff call while an earlier run is still going', () => {
+  const HANDOFF_2 = { note: '# Handoff\n\nStep 3 done too.', continuation: 'Resume at step 4.', files: [] }
+
+  test('in the turn the compaction waits for, the newer note and prompt take the place of the older', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await agentArmed($)
+    await turnEnd($, 'work-1')
+    // a message queued before the hold starts a turn first
+    await turnStart($, 'mate-1')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual([])
+
+    const answer = await handoff($, HANDOFF_2)
+    expect(answer).toMatch(/in place of the one saved before this turn/)
+    expect(answer).toContain(NOTE)
+    await turnEnd($, 'mate-1')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['compact', 'submit'])
+    expect(w.writes.findLast(x => x.path === NOTE)?.text).toContain('Step 3 done too.')
+    // the newer note covers the turn, so the prompt doesn't call it stale
+    expect(w.submits[0]?.text).toBe(forSubmit(composeContinuation(HANDOFF_2, NOTE)))
+    expect(runDone(w)).toEqual(['run done phase=continuing outcome=delivered deliver=submit source=agent'])
+  })
+
+  /** The agent's run has compacted and its continuation sits in the queue behind a turn the person started. */
+  const queuedBehindATurn = async ($: any, on: On, opts: WorldOpts = {}) => {
+    const queue = deferred<void>()
+    const w = world(on, { ...opts, submitGate: text => (text === forSubmit(PROMPT) ? queue.p : undefined) })
+    await start($)
+    await agentRun($, w)
+    expect(w.calls).toEqual(['compact', 'submit'])
+    await turnStart($, 'person-1', 'one more thing first')
+    return { w, queue }
+  }
+  const NOTE_2 = '/tmp/T/claude-relay/my-proj-20261007T150001Z.md'
+
+  test('with its continuation still queued, a new handoff starts a run of its own, and the queued prompt’s turn is cut short', async ($, on) => {
+    const { w, queue } = await queuedBehindATurn($, on)
+    const answer = await handoff($, HANDOFF_2)
+    expect(answer).toMatch(/Handoff saved/)
+    expect(answer).toContain(NOTE_2)
+    expect(w.writes.find(x => x.path === NOTE_2)?.text).toContain('Step 3 done too.')
+
+    await turnEnd($, 'person-1')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['compact', 'submit', 'compact', 'submit'])
+    const sent = w.submits.at(-1)?.text ?? ''
+    expect(sent).toContain(composeContinuation(HANDOFF_2, NOTE_2))
+    expect(sent).toContain(supersededLine(NOTE))
+
+    // the older prompt comes off the queue first: its turn ends at once, and the hold stays for the newer one
+    await turnStart($, 'old-1', forSubmit(PROMPT))
+    await w.clock.advance(0)
+    expect(w.aborts).toEqual(['old-1'])
+    expect((await arrive($, 'bg', 'task-notification')).drop).toMatch(/holding/)
+    await turnEnd($, 'old-1', 'aborted')
+    queue.resolve()
+    await w.clock.advance(SEC)
+    expect(w.logs.some(l => /stopped|refused/.test(l))).toBe(false)
+
+    await turnStart($, 'cont-2', sent)
+    await w.clock.advance(0)
+    expect(w.submits.at(-1)?.text).toContain('bg')
+    expect(w.aborts).toEqual(['old-1'])
+  })
+
+  test('the queued prompt’s turn starting before the newer compaction is cut short and waited out, and the note is no staler for it', async ($, on) => {
+    const { w } = await queuedBehindATurn($, on)
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1')
+    await turnStart($, 'old-1', forSubmit(PROMPT))
+    await w.clock.advance(SEC)
+    expect(w.aborts).toEqual(['old-1'])
+    expect(w.calls).toEqual(['compact', 'submit'])
+
+    await turnEnd($, 'old-1', 'aborted')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['compact', 'submit', 'compact', 'submit'])
+    expect(w.submits.at(-1)?.text).not.toContain(STALE_NOTE)
+    expect(notCompacted(w.submits.map(x => x.text))).toBe(false)
+  })
+
+  test('a turn that cannot be cut short runs, and the newer run still compacts after it', async ($, on) => {
+    const { w } = await queuedBehindATurn($, on, { abortFails: true })
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1')
+    await turnStart($, 'old-1', forSubmit(PROMPT))
+    await w.clock.advance(SEC)
+    expect(w.logs.some(l => /couldn't cut the replaced prompt's turn short/.test(l))).toBe(true)
+    await turnEnd($, 'old-1')
+    await w.clock.advance(SEC)
+    expect(w.calls).toEqual(['compact', 'submit', 'compact', 'submit'])
+  })
+
+  test('a newer run that stops leaves the queued prompt to run', async ($, on) => {
+    const { w } = await queuedBehindATurn($, on)
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1', 'aborted')
+    await w.clock.advance(SEC)
+    await turnStart($, 'old-1', forSubmit(PROMPT))
+    await w.clock.advance(SEC)
+    expect(w.aborts).toEqual([])
+  })
+
+  test("a person's prompt that mentions the replaced note is not cut short", async ($, on) => {
+    const { w } = await queuedBehindATurn($, on)
+    await handoff($, HANDOFF_2)
+    await turnEnd($, 'person-1')
+    await w.clock.advance(SEC)
+    await turnStart($, 'person-2', `what does @${NOTE} say?`)
+    await w.clock.advance(SEC)
+    expect(w.aborts).toEqual([])
+  })
+
+  test('a second call in the handoff’s own turn, or while the compaction runs, still changes nothing', async ($, on) => {
+    world(on)
+    await start($)
+    await agentArmed($)
+    expect(await handoff($, HANDOFF_2)).toMatch(/already saved/)
   })
 })
 

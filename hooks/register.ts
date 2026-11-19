@@ -13,6 +13,7 @@ import {
   heldNotice,
   holdAppend,
   isCanceled,
+  isContinuationFor,
   isHeldOrigin,
   isPersonOrigin,
   isRunRecord,
@@ -22,20 +23,26 @@ import {
   parseArgs,
   parseHandoff,
   promptPathFor,
+  QUEUED_NOTE,
+  replacedText,
   restoreHold,
   RUN_KEY_PREFIX,
   runKey,
   SAVE_MARKER,
   savePrompt,
   STALE_NOTE,
+  stillUnseen,
   SUBAGENT_TEXT,
+  supersededLine,
   teammateItem,
   TOOL,
   TOOL_DESCRIPTION,
   TOOL_NAME,
   TOOL_SCHEMA,
   UNSAVED_TEXT,
+  UNSEEN_TEXT,
   withSession,
+  withUnseen,
 } from './prompts'
 import type { Handoff } from './prompts'
 import type { Config, Deliver, Hold, Run, RunRecord, SavedPrompt } from '../types'
@@ -63,11 +70,12 @@ const IDLE: Run = {
   deferrals: 0,
   isStale: false,
   isBlocked: false,
+  unseen: [],
 }
 
 // The shape tags change with the types: a value an older version stored (it
 // outlives a hot reload) then reads as the initial one instead of breaking.
-const runAtom = atom({ plugin: 'relay', key: 'run' } as const, IDLE, { shape: 'run-2' })
+const runAtom = atom({ plugin: 'relay', key: 'run' } as const, IDLE, { shape: 'run-3' })
 
 const RELEASED: Hold = { isHolding: false, items: [], endsAtTurn: false, gen: 0, notice: null }
 const holdAtom = atom({ plugin: 'relay', key: 'hold' } as const, RELEASED, { shape: 'hold-2' })
@@ -98,6 +106,16 @@ let sentEarlyRunId: number | null = null
  * so another session's run could overwrite it before this one delivers.
  */
 let runHandoff: { runId: number; handoff: Pick<Handoff, 'continuation' | 'files'> } | null = null
+/**
+ * Notes whose continuation prompt was still queued when a newer handoff
+ * replaced its run. A queued prompt can't be withdrawn, so its turn is cut
+ * short when it starts.
+ */
+const staleNotes = new Set<string>()
+/** The run that replaced one with a queued prompt, and that prompt's note: its own prompt says to ignore the other. */
+let replaced: { runId: number; notePath: string } | null = null
+/** The turn relay is cutting short: its end is not an interruption of the run. */
+let cutTurnId: string | null = null
 
 function configFrom(options: PluginOptions): Config {
   const instructions = typeof options.compactInstructions === 'string' ? options.compactInstructions.trim() : ''
@@ -373,9 +391,14 @@ async function finish($: EngineInterface, runId: number, message: string | null,
   try {
     const run = await read($, runAtom)
     if (run.runId !== runId || run.phase === 'idle') return
-    await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId, isBlocked: options.block ?? cur.isBlocked } : cur))
+    await update($, runAtom, cur => (cur.runId === runId ? { ...IDLE, runId, isBlocked: options.block ?? cur.isBlocked, unseen: cur.unseen } : cur))
     await forgetRun($)
     if (waitingRunId === runId) waitingRunId = null
+    // A run that stops sends no prompt to take the queued one's place, so that one runs after all.
+    if (message !== null && replaced?.runId === runId) {
+      staleNotes.delete(replaced.notePath)
+      replaced = null
+    }
     $.ui.status(undefined)
     logRunDone($, run, message === null ? 'delivered' : 'stopped')
     if (message === null) return
@@ -495,6 +518,11 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
   // already over: compacting now could compact over its work. (It may be a queued teammate
   // message's instead; stopping is the safe reading, since nothing is compacted.)
   if (isTurnRunning || sentEarlyRunId === runId) {
+    // The turn relay is cutting short did no work: wait for it to end, and the note is no staler for it.
+    if (isTurnRunning && cutTurnId !== null) {
+      waitingRunId = runId
+      return
+    }
     if (filledEarlyRunId === runId) {
       await finish(
         $,
@@ -533,6 +561,10 @@ async function compact($: EngineInterface, runId: number, attempt = 1): Promise<
     }
     // Rejected because a turn got in first: with nothing in the box, wait for it.
     if (isTurnRunning && filledEarlyRunId !== runId) {
+      if (cutTurnId !== null) {
+        waitingRunId = runId
+        return
+      }
       await deferCompaction($, runId)
       return
     }
@@ -586,7 +618,8 @@ async function deliver($: EngineInterface, runId: number) {
     // A plugin's submit carries no context, so what was held goes in its text.
     // The hold stays on until this prompt's turn starts, so nothing gets in ahead of it.
     const held = await takeHeld($)
-    const body = held.length ? `${forSubmit(text)}\n\n${heldNotice(held)}` : forSubmit(text)
+    const parts = [forSubmit(text), ...(replaced?.runId === runId ? [supersededLine(replaced.notePath)] : []), ...(held.length ? [heldNotice(held)] : [])]
+    const body = parts.join('\n\n')
     let refused: string | null = null
     try {
       // By the types, resolves once the prompt entered and its turn started, or was queued; one
@@ -595,6 +628,11 @@ async function deliver($: EngineInterface, runId: number) {
       if (r.drop !== undefined) refused = r.drop
     } catch (err) {
       refused = errorText(err)
+    }
+    // A newer handoff or a cancel ended this run while its prompt sat in the queue: nothing more to say for it.
+    if ((await read($, runAtom)).runId !== runId) {
+      if (refused !== null) await submitLater($, null, held)
+      return
     }
     if (refused === null) {
       await finish($, runId, null)
@@ -652,44 +690,54 @@ async function notePathNow($: EngineInterface, startedAt: number): Promise<strin
  */
 async function arm($: EngineInterface, handoff: Handoff): Promise<string> {
   let run = await read($, runAtom)
-  if (run.phase === 'armed' || run.phase === 'continuing') return ALREADY_TEXT
-  if (run.phase === 'idle') {
+  if (run.phase === 'armed') return ALREADY_TEXT
+  /** The run this call's run replaces: compacted, with its continuation prompt still in the queue behind this turn. */
+  let old: Run | null = null
+  if (run.phase === 'continuing') {
+    const state = compaction?.runId === run.runId ? compaction.state : null
+    if (state === 'pending' || filledEarlyRunId === run.runId) return ALREADY_TEXT
+    // Not compacted yet: this is the turn the compaction waits for, and its note is the newer one.
+    if (state === null) return replaceHandoff($, run, handoff)
+    old = run
+  }
+  if (run.phase === 'idle' || old !== null) {
+    const before = run
+    const queued = old === null ? '' : ` ${QUEUED_NOTE}`
     if (run.isBlocked) return CANCELLED_TEXT
+    if (run.unseen.length) return `${await refuseUnseen($)}${queued}`
     const tokens = await contextTokens($)
-    if (tokens !== null && tokens < config.minTokens) return belowMinText(tokens, config.minTokens)
+    if (tokens !== null && tokens < config.minTokens) return `${belowMinText(tokens, config.minTokens)}${queued}`
     const startedAt = await $.clock.now()
     const notePath = await notePathNow($, startedAt)
+    // Named to the second, like the old run's: with the same name the two prompts couldn't be told apart.
+    if (old !== null && notePath === old.notePath) return ALREADY_TEXT
     run = await update($, runAtom, cur =>
-      // Checked again here: the person's prompt may have blocked this turn while the size was read.
-      cur.phase === 'idle' && !cur.isBlocked
+      // Checked again here: the person's prompt may have reached this turn while the size was read.
+      cur.runId === before.runId && cur.phase === before.phase && !cur.isBlocked && !cur.unseen.length
         ? { ...IDLE, phase: 'saving' as const, runId: cur.runId + 1, startedAt, notePath, source: 'agent' as const }
         : cur,
     )
     if (run.isBlocked) return CANCELLED_TEXT
-    if (run.phase !== 'saving' || run.source !== 'agent') return ALREADY_TEXT
+    if (run.unseen.length) return `${await refuseUnseen($)}${queued}`
+    if (run.phase !== 'saving' || run.source !== 'agent' || run.runId !== before.runId + 1) return ALREADY_TEXT
   }
   const { runId, notePath, startedAt, source } = run
   if (notePath === null || startedAt === null) return UNSAVED_TEXT
-  const sessionId = await $.session.id()
-  try {
-    await $.fs.write(notePath, `${withSession(handoff.note, sessionId)}\n`)
-  } catch (err) {
-    await finish($, runId, `stopped: couldn't write the handoff note to ${notePath} (${errorText(err)}). Nothing was compacted.`, { tell: 'none' })
-    return `${UNSAVED_TEXT} (${errorText(err)})`
+  const failure = await saveFiles($, run, handoff)
+  if (failure !== null) {
+    await finish($, runId, `stopped: couldn't write the handoff note to ${notePath} (${failure}). Nothing was compacted.`, { tell: 'none' })
+    return `${UNSAVED_TEXT} (${failure})${old === null ? '' : ` ${QUEUED_NOTE}`}`
   }
-  runHandoff = { runId, handoff: { continuation: handoff.continuation, files: handoff.files } }
-  const text = composeContinuation(handoff, notePath)
-  const saved: SavedPrompt = { text, at: await $.clock.now(), sessionId }
-  await $.store.set('lastPrompt', saved).catch(() => undefined)
-  // Kept beside the note: to compare with what was sent, and to deliver from after a reload.
-  await $.fs.write(promptPathFor(notePath), `${text}\n`).catch(() => undefined)
-  // The agent's own run mustn't replace what the person has on the clipboard.
-  if (source === 'person' && config.copyToClipboard) await $.ui.copy({ text }).catch(() => undefined)
   const armed = await update($, runAtom, cur =>
     cur.runId === runId && cur.phase === 'saving' ? { ...cur, phase: 'armed' as const } : cur,
   )
   // A cancel got in while the files were written.
   if (armed.runId !== runId || armed.phase !== 'armed') return UNSAVED_TEXT
+  if (old?.notePath) {
+    staleNotes.add(old.notePath)
+    replaced = { runId, notePath: old.notePath }
+    debugLog($, `run ${old.runId} replaced while its continuation prompt was queued; that prompt's turn will be cut short`)
+  }
   await recordRun($, { phase: 'armed', notePath, startedAt, source })
   // From here on, a delivery that would start a turn of its own waits for the continuation prompt.
   await update($, holdAtom, cur => ({ ...cur, isHolding: true, endsAtTurn: false, notice: null, gen: (cur.gen ?? 0) + 1 }))
@@ -701,6 +749,73 @@ async function arm($: EngineInterface, handoff: Handoff): Promise<string> {
   }
   $.ui.status('handoff saved; compacting when this turn ends…')
   return acceptedText(notePath, deliverMode(armed))
+}
+
+/** Writes the note and the continuation prompt for `run`; returns why the note couldn't be written, or null. */
+async function saveFiles($: EngineInterface, run: Pick<Run, 'runId' | 'notePath' | 'source'>, handoff: Handoff): Promise<string | null> {
+  const { runId, notePath, source } = run
+  if (notePath === null) return 'no note path'
+  const sessionId = await $.session.id()
+  try {
+    await $.fs.write(notePath, `${withSession(handoff.note, sessionId)}\n`)
+  } catch (err) {
+    return errorText(err)
+  }
+  runHandoff = { runId, handoff: { continuation: handoff.continuation, files: handoff.files } }
+  const text = composeContinuation(handoff, notePath)
+  const saved: SavedPrompt = { text, at: await $.clock.now(), sessionId }
+  await $.store.set('lastPrompt', saved).catch(() => undefined)
+  // Kept beside the note: to compare with what was sent, and to deliver from after a reload.
+  await $.fs.write(promptPathFor(notePath), `${text}\n`).catch(() => undefined)
+  // The agent's own run mustn't replace what the person has on the clipboard.
+  if (source === 'person' && config.copyToClipboard) await $.ui.copy({ text }).catch(() => undefined)
+  return null
+}
+
+/**
+ * A handoff call in the turn a compaction is waiting for (a message queued
+ * before the hold started it): the run keeps going, with this call's note and
+ * prompt in place of the ones written before the turn.
+ */
+async function replaceHandoff($: EngineInterface, run: Run, handoff: Handoff): Promise<string> {
+  const failure = await saveFiles($, run, handoff)
+  if (failure !== null) {
+    return `Nothing new was saved (${failure}). The handoff saved before this turn still stands, and relay compacts when this turn ends: end your turn now with a one-line status.`
+  }
+  // This note covers the turn, so the prompt needn't say the summary is newer.
+  const now = await update($, runAtom, cur => (cur.runId === run.runId && cur.phase === 'continuing' ? { ...cur, isStale: false } : cur))
+  if (now.runId !== run.runId || now.phase !== 'continuing' || run.notePath === null) return UNSAVED_TEXT
+  debugLog($, 'handoff replaced in the turn the compaction waits for')
+  return replacedText(run.notePath, deliverMode(run))
+}
+
+/**
+ * Refuses a handoff written before the model read a prompt the person typed
+ * over the turn. That prompt reaches the model with this answer, or starts
+ * the next turn, so the list is emptied: the next call isn't refused for it.
+ */
+async function refuseUnseen($: EngineInterface): Promise<string> {
+  await update($, runAtom, cur => (cur.unseen.length ? { ...cur, unseen: [] } : cur))
+  return UNSEEN_TEXT
+}
+
+function debugLog($: EngineInterface, text: string) {
+  try {
+    $.ui.log(text, { to: 'debug' })
+  } catch {
+    // Best effort.
+  }
+}
+
+/** Ends the turn of a replaced run's prompt. From a timer, like a submit; a refusal leaves the turn to run. */
+function cutTurn($: EngineInterface, turnId: string) {
+  const cut = () =>
+    $.turn
+      .abort({ turnId })
+      .then(() => toast($, 'skipped a continuation prompt that a newer handoff replaced'))
+      .catch(err => debugLog($, `couldn't cut the replaced prompt's turn short (${errorText(err)}); it runs`))
+  if (!isInteractive) return void cut()
+  $.clock.after(0, () => void cut())
 }
 
 /** Submits the save prompt; called from a timer, since command.run can't submit. */
@@ -822,6 +937,16 @@ export const register: Register = (on, options) => {
     // Subagents' and teammates' turns raise turn.start too (2.1.312; not 2.1.294); only the main loop's count.
     if (e.agentId !== undefined) return next(e)
     isTurnRunning = true
+    // The prompt of a run a newer handoff replaced: it couldn't be withdrawn from the queue, so its
+    // turn is cut short here. It ends no hold and makes no note stale; the newer prompt follows.
+    const staleNote = [...staleNotes].find(note => isContinuationFor(e.text, note))
+    if (staleNote !== undefined) {
+      staleNotes.delete(staleNote)
+      cutTurnId = e.turnId
+      const started = await next(e)
+      cutTurn($, e.turnId)
+      return started
+    }
     // The person's prompt took what was held at Enter; anything since follows its turn.
     if ((await read($, holdAtom)).endsAtTurn) await releaseToSession($)
     const run = await read($, runAtom)
@@ -829,7 +954,8 @@ export const register: Register = (on, options) => {
     if (run.phase === 'continuing' && filledEarlyRunId === run.runId) sentEarlyRunId = run.runId
     // A handoff call is refused in a turn whose /relay was stopped, and in a save turn with no run behind it.
     const isBlocked = e.text.includes(SAVE_MARKER) && !(run.phase === 'saving' && run.source === 'person' && run.saveTurnId === null)
-    if (run.isBlocked !== isBlocked) await update($, runAtom, cur => ({ ...cur, isBlocked }))
+    // What the person typed over the last turn starts this one or was read in that one.
+    if (run.isBlocked !== isBlocked || run.unseen.length) await update($, runAtom, cur => ({ ...cur, isBlocked, unseen: [] }))
     // A turn before the compaction was asked for ran on the uncompacted conversation, after the note.
     if (run.phase === 'continuing' && compaction?.runId !== run.runId) {
       await update($, runAtom, cur => (cur.runId === run.runId ? { ...cur, isStale: true } : cur))
@@ -844,6 +970,9 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
     isTurnRunning = false
+    // The end of a turn relay cut short is no interruption: the run it waited on goes ahead.
+    const wasCut = cutTurnId === e.turnId
+    if (wasCut) cutTurnId = null
     const run = await read($, runAtom)
     if (run.phase === 'saving' && run.saveTurnId !== null && run.saveTurnId === e.turnId) {
       await finish($, run.runId, `stopped: the save turn ended (${e.reason}) without calling the ${TOOL} tool. Nothing was saved or compacted; /relay to retry.`)
@@ -866,7 +995,7 @@ export const register: Register = (on, options) => {
     if (run.phase === 'continuing' && waitingRunId === run.runId) {
       // The turn the compaction waited for has ended.
       waitingRunId = null
-      if (e.reason !== 'answer') {
+      if (e.reason !== 'answer' && !wasCut) {
         await finish($, run.runId, `stopped: the turn that started before the compaction ended (${e.reason}). Nothing was compacted.`)
         return result
       }
@@ -890,6 +1019,7 @@ export const register: Register = (on, options) => {
     })
     if (isCaptured) {
       await saveHeld($)
+      debugLog($, `held a teammate message (compaction ${compaction?.state ?? 'not started'})`)
       return { consumed: 'relay is holding this until the continuation prompt, which carries it' }
     }
     return next(e)
@@ -909,17 +1039,17 @@ export const register: Register = (on, options) => {
       })
       if (isCaptured) {
         await saveHeld($)
+        debugLog($, `held a ${e.origin.kind} delivery (run ${run.phase}, compaction ${compaction?.state ?? 'not started'})`)
         return { drop: 'relay is holding this until you send the continuation prompt; it goes along with that prompt.' }
       }
       return next(e)
     }
     if (!isPersonOrigin(e.origin.kind)) return next(e)
-    if (run.phase === 'idle') {
-      // Typed over a running turn, it runs next: a handoff the agent starts later
-      // in this turn would compact over it and then send a continuation after it.
-      if (e.turnId !== undefined && !run.isBlocked) await update($, runAtom, cur => ({ ...cur, isBlocked: true }))
-      if (!hold.isHolding && !hold.notice) return next(e)
-    }
+    // Typed over a running turn, the model reads it at the turn's next step: a handoff written
+    // before then would leave it out, so one is refused until it is read (session.append).
+    // One the person asked to wait its turn runs after this one, and the compaction waits for it.
+    if (e.turnId !== undefined && !e.wait) await update($, runAtom, cur => ({ ...cur, unseen: withUnseen(cur.unseen, e.text) }))
+    if (run.phase === 'idle' && !hold.isHolding && !hold.notice) return next(e)
     // The person's prompt got in before the compaction: it is theirs to run
     // now, so the run stops, and this prompt tells the model. Once the
     // compaction is in flight or done it is queued behind it; with the prompt
@@ -959,6 +1089,16 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e)) // a failure lets the prompt through; holding is best effort
 
+  // A prompt typed over a turn is attached to it as a `queued_command` row, which the model's
+  // next step reads. Seen in transcripts (2.1.326, 2.1.327); if a build stops raising it, a
+  // handoff after a typed-over prompt is refused once (`refuseUnseen`) and then goes through.
+  on('session.append', { door: 'attachment' }, async ($, e, next) => {
+    if (e.agentId === undefined && e.message.name === 'queued_command' && (await read($, runAtom)).unseen.length) {
+      await update($, runAtom, cur => ({ ...cur, unseen: stillUnseen(cur.unseen, e.message.content) }))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('command.run', { command: 'relay' }, async ($, e) => {
     const cmd = parseArgs(e.args)
     const run = await read($, runAtom)
@@ -981,6 +1121,9 @@ export const register: Register = (on, options) => {
         if (run.phase !== 'idle') {
           cancelTimer()
           waitingRunId = null
+          // With no newer prompt coming, a replaced run's queued prompt is left to run.
+          staleNotes.clear()
+          replaced = null
           await update($, runAtom, cur => ({ ...IDLE, runId: cur.runId + 1, isBlocked: true }))
           await forgetRun($)
           $.ui.status(undefined)
