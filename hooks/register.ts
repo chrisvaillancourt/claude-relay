@@ -131,6 +131,23 @@ async function release($: EngineInterface): Promise<string[]> {
 }
 
 /**
+ * Takes what's held for relay's own prompt to carry, and keeps holding until
+ * that prompt's turn starts. Releasing before the submit left a gap: a delivery
+ * queued during the compaction is dequeued as the session goes idle, and started
+ * a turn of its own ahead of the continuation (seen 2026-11-18 on 2.1.327).
+ * What's held from here on follows the turn (`turn.start`).
+ */
+async function takeHeld($: EngineInterface): Promise<string[]> {
+  let items: string[] = []
+  await update($, holdAtom, cur => {
+    items = cur.isHolding ? cur.items : []
+    return cur.isHolding ? { ...cur, items: [], endsAtTurn: true } : cur
+  })
+  await saveHeld($)
+  return items
+}
+
+/**
  * Keeps what's held in `$.store` too. A consumed delivery is in no queue and
  * no transcript, so the hold in `$.state` would be its only copy, and a new
  * process loses `$.state`. Best effort.
@@ -560,13 +577,14 @@ async function deliver($: EngineInterface, runId: number) {
     await finish($, runId, `compacted, but the continuation prompt was lost. Continue from @${run.notePath}.`, { keepHold: true, isCompacted: true })
     // Nobody may be there to send it for the agent's run.
     if (run.source === 'agent') {
-      await submitLater($, `relay compacted this conversation, but its continuation prompt was lost. Read ${run.notePath} and continue from it.`, await release($))
+      await submitLater($, `relay compacted this conversation, but its continuation prompt was lost. Read ${run.notePath} and continue from it.`, await takeHeld($))
     }
     return
   }
   if (deliverMode(run) === 'submit') {
     // A plugin's submit carries no context, so what was held goes in its text.
-    const held = await release($)
+    // The hold stays on until this prompt's turn starts, so nothing gets in ahead of it.
+    const held = await takeHeld($)
     const body = held.length ? `${forSubmit(text)}\n\n${heldNotice(held)}` : forSubmit(text)
     let refused: string | null = null
     try {
@@ -878,8 +896,9 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     const hold = await read($, holdAtom)
     const run = await read($, runAtom)
-    // One delivered into a running turn starts no turn of its own.
-    if (hold.isHolding && isHeldOrigin(e.origin.kind) && e.turnId === undefined) {
+    // One delivered into a running turn starts no turn of its own. One stamped
+    // with a turn that has since ended would, so it is held like the rest.
+    if (hold.isHolding && isHeldOrigin(e.origin.kind) && (e.turnId === undefined || !isTurnRunning)) {
       let isCaptured = false
       await update($, holdAtom, cur => {
         const held = holdAppend(cur, e.text)

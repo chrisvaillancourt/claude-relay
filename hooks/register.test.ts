@@ -892,7 +892,8 @@ describe('deliveries wait for the continuation prompt', () => {
     expect(w.calls).toEqual(['compact', 'submit'])
     expect(w.submits[0]?.text).toContain('Message from teammate impl-16204:\nPLAT-16204 implement: done.')
     expect(w.submits[0]?.text).toContain('idle_notification')
-    // delivered: the next one passes
+    // once the continuation's turn has started, the next one passes
+    await turnStart($, 'cont-1', w.submits[0]?.text)
     expect((await teammate($, 'later')).text).toBe('later')
     expect(w.received).toEqual(['later'])
   })
@@ -1065,6 +1066,52 @@ describe('deliveries wait for the continuation prompt', () => {
 
     expect(w.submits.at(-1)?.text).toContain(PROMPT)
     expect(w.submits.at(-1)?.text).toContain('bg during compaction')
+  })
+
+  test('submit mode: the hold lasts until the continuation’s turn starts; what arrives in between follows that turn', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await agentRun($, w)
+    const sent = w.submits.at(-1)?.text ?? ''
+    expect(sent).toBe(forSubmit(PROMPT))
+    // dequeued as the session went idle after the compaction, before the continuation's turn started
+    expect((await arrive($, 'hand-back queued during the compaction', 'peer')).drop).toMatch(/holding/)
+    expect(w.store.get('held/sid-1')).toEqual(['hand-back queued during the compaction'])
+
+    await turnStart($, 'cont-1', sent)
+    await w.clock.advance(0)
+    expect(w.submits.at(-1)?.origin).toBe('plugin')
+    expect(w.submits.at(-1)?.text).toContain('hand-back queued during the compaction')
+    expect((await arrive($, 'after', 'task-notification')).drop).toBeUndefined()
+  })
+
+  test('a delivery stamped with a turn that has ended would start a turn of its own, so it is held', async ($, on) => {
+    const gate = deferred<void>()
+    const w = world(on, { compactGate: gate.p })
+    await start($)
+    await agentArmed($)
+    await turnEnd($, 'work-1')
+    await w.clock.advance(0)
+    expect((await arrive($, 'stamped late', 'peer', 'work-1')).drop).toMatch(/holding/)
+    gate.resolve()
+    await w.clock.advance(SEC)
+    expect(w.submits.at(-1)?.text).toContain('stamped late')
+  })
+
+  test('submit mode: a refused continuation hands back what arrived while it was being sent', async ($, on) => {
+    let arrived: Promise<{ drop?: string }> | null = null
+    const w = world(on, {
+      dropSubmit: text => {
+        if (!text.includes('Come up to speed')) return undefined
+        arrived = arrive($, 'arrived mid-submit', 'task-notification')
+        return 'refused'
+      },
+    })
+    await start($)
+    await agentRun($, w)
+    await w.clock.advance(SEC)
+    expect((await arrived!).drop).toMatch(/holding/)
+    expect(w.submits.some(s => s.origin === 'plugin' && s.text.includes('arrived mid-submit'))).toBe(true)
     expect((await arrive($, 'after', 'task-notification')).drop).toBeUndefined()
   })
 
