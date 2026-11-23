@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "/relay and a handoff tool: update stale docs, save a handoff note to a temp file, compact, and continue from a prompt written before the compaction.",
   "types": "./types/index.d.ts",
   "userConfig": {

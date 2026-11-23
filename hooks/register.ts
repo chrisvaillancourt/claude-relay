@@ -1118,9 +1118,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e)) // a failure lets the prompt through; holding is best effort
 
   // A prompt typed over a turn is attached to it as a `queued_command` row, which the model's
-  // next step reads. Seen in transcripts (2.1.326, 2.1.327); if a build stops raising it, a
-  // handoff after a typed-over prompt is refused once (`refuseUnseen`) and then goes through.
-  on('session.append', { door: 'attachment' }, async ($, e, next) => {
+  // next step reads. The row comes in on the `delivery` door (checked live on 2.1.330), which
+  // the built-in cc-plugin-sec-default doesn't skip; `attachment` is one it does. If a build
+  // stops raising it, a handoff after a typed-over prompt is refused once (`refuseUnseen`) and
+  // then goes through.
+  on('session.append', { door: 'delivery' }, async ($, e, next) => {
     if (e.agentId === undefined && e.message.name === 'queued_command' && (await read($, runAtom)).unseen.length) {
       await update($, runAtom, cur => ({ ...cur, unseen: stillUnseen(cur.unseen, e.message.content) }))
     }

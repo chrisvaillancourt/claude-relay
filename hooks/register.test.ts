@@ -218,13 +218,17 @@ const handoff = async ($: any, input: Record<string, unknown> = HANDOFF, agentId
 
 const turnStart = ($: any, turnId: string, text = 'work') => $.turn.start({ text, turnId })
 
-/** A prompt queued over the running turn being attached to it, where the model's next step reads it. */
+/**
+ * A prompt queued over the running turn being attached to it, where the model's next step reads it.
+ * The row and its door are as Claude Code 2.1.330 raised them live: an `attachment` row named
+ * `queued_command`, on the `delivery` door.
+ */
 const attach = ($: any, text: string, extra: Record<string, unknown> = {}) =>
   $.session.append({
-    door: 'attachment',
-    origin: { kind: 'composer' },
+    door: 'delivery',
+    origin: { kind: 'unclassified' },
     uuid: 'row-1',
-    message: { type: 'attachment', name: 'queued_command', content: [{ type: 'text', text: `The user sent a new message while you were working:\n${text}` }] },
+    message: { type: 'attachment', name: 'queued_command', content: [{ type: 'text', text: `<system-reminder>\nThe user sent a new message while you were working:\n${text}\n</system-reminder>` }] },
     ...extra,
   })
 
