@@ -30,7 +30,7 @@ relay declines the call, and says why, when:
 - `note` or `continuation` is missing;
 - a handoff is already saved for this turn;
 - you cancelled this turn's `/relay` (until the next turn starts);
-- you typed a prompt over the running turn and the model hasn't read it yet: the note would be written without it. Claude Code attaches such a prompt to the turn at its next step, and from then on a handoff goes through, so "finish up, then hand off" typed mid-turn works. If relay never sees the prompt attached (or the prompt is under 12 characters, too short to tell from other text), it declines one call and accepts the next, since the prompt reaches the model with that answer.
+- you typed a prompt over the running turn and the model hasn't read it yet: the note would be written without it. Claude Code attaches such a prompt to the turn at its next step, and from then on a handoff goes through, so "finish up, then hand off" typed mid-turn works. If relay never sees the prompt attached (or the prompt is under 12 characters, too short to tell from other text), it declines one call and accepts the next, since the prompt reaches the model with that answer. Today relay never sees it attached (see [Known issues](#known-issues)), so a handoff called later in the same turn is declined once.
 
 A call in a later turn, while an earlier handoff is unfinished, replaces that handoff:
 
@@ -114,6 +114,20 @@ Follow the saving-session-state skill.
 
 A skill named there must be one the model can invoke (no `disable-model-invocation`), because the save turn asks the model to load it. Whatever it runs shouldn't stop to ask questions: relay continues only once the save turn calls the tool and ends.
 
+## Known issues
+
+- **A typed-over prompt costs one declined handoff when the agent hands off in the same turn.** relay listens for the prompt's attachment on `session.append`'s `attachment` door, but Claude Code delivers it as a `queued_command` row on the `delivery` door (checked live on 2.1.330, on a personal and a Team account). So relay never sees the model read the prompt, and the unread list clears only when a handoff is declined or the next turn starts. Nothing is lost: the agent's next call goes through. The fix is to listen on the `delivery` door instead, which the built-in security plugin doesn't skip (next section).
+
+## Team, Enterprise and managed environments
+
+Claude Code ships a built-in plugin, `cc-plugin-sec-default@builtin`. It keeps an organization's classic hooks, prompt content, settings and tool policy out of reach of the plugins a person installs, and adds no policy of its own. `claude plugin list` doesn't show it. Claude Code seats it ahead of every user-installed mod when the account is a Team or Enterprise organization, when the machine has managed settings or a managed MCP file, or when the organization's managed `prependPlugins` lists it. A person can't turn it off; an organization can, for all its members, through managed `prependPlugins`.
+
+Once seated, it sends these events on past user mods, so their hooks for them never run: every `classic.*` event; `session.compact`; `prompt.section`, `prompt.context`, `prompt.attachment`, `prompt.compose`, `skill.prompt`, `attribution.text` and `settings.read`; and `session.append` rows on the `attachment`, `hook-context` and `compaction` doors.
+
+One relay hook is on that list: `session.append` on the `attachment` door, the one in [Known issues](#known-issues). It does nothing on any account today, so seating changes no behavior. Everything else (the handoff tool, `/relay`, the hold, the compaction and the delivery) runs on events that aren't skipped: `prompt.submit`, `session.receive`, `tool.call`, `turn.*`, `command.run` and `session.start`.
+
+What seating adds: Claude Code tells the model about the skip. A `<task-notification>` reading `relay: its session.append hook was skipped. "cc-plugin-sec-default" runs first and sent the event on past it.` arrives once or twice a session (seen with relay installed from a local clone). The debug log has a line for every skip: `relay: session.append bypassed by cc-plugin-sec-default (tier user); beneath runs`. Moving the hook to the `delivery` door ends both.
+
 ## Troubleshooting
 
 Each run writes one line to the debug log when it ends (`claude --debug`, or `~/.claude/debug/<session id>.txt`):
@@ -133,8 +147,9 @@ A delivery relay holds logs `held a <kind> delivery (run <phase>, compaction <no
 - Enter during a compaction queues the prompt, which runs once compaction finishes (confirmed by use, 2026-11).
 - Claude Code 2.1.325, 2026-11-14, with an observer mod and a live teammate: a teammate's message and idle notice raise `session.receive` with origin `{kind: "peer", teammate, isVerified: true}` and no `prompt.submit`; one that arrives mid-turn starts a turn of its own when the running turn ends.
 - Claude Code 2.1.325, 2026-11-14, interactive, a handoff the agent started: the tool call saved the note and the prompt, the conversation was compacted when the turn ended, and the continuation prompt arrived as a submitted message with the note listed first. A background job that finished during the compaction didn't start a turn; its notification arrived inside the continuation prompt. The debug log read `run done phase=continuing outcome=delivered deliver=submit source=agent`.
+- Claude Code 2.1.330, 2026-11-22, headless (`--input-format stream-json`) with an observer mod that logged every `session.append` row, on a personal and a Team account: a prompt sent while a turn ran raised `prompt.submit` with that turn's id, then reached `session.append` as an `attachment` row named `queued_command` on the `delivery` door (text `The user sent a new message while you were working: …`), then as a `queue` row. relay's `attachment`-door hook doesn't match it (see [Known issues](#known-issues)). On the Team account, `delivery` rows reached the mod; `attachment` rows and `classic.SessionStart` were skipped and reported to the model. The prompt came from the SDK, not the keyboard. The API types say a row's door is decided from the row alone, so a typed prompt should take the same door; that wasn't checked interactively.
 
-Not yet run live: the headless path; holding a teammate's message at `session.receive` (that `{consumed}` there keeps it out of the queue is from the API types); ending a replaced prompt's turn with `$.turn.abort`; and reading a typed-over prompt's attachment at `session.append` (the `queued_command` row is from transcripts, the hook from the API types). Everything else here is covered by `claude plugin test`.
+Not yet run live: the headless path; holding a teammate's message at `session.receive` (that `{consumed}` there keeps it out of the queue is from the API types); and ending a replaced prompt's turn with `$.turn.abort`. Everything else here is covered by `claude plugin test`.
 
 ## Install
 
